@@ -31,6 +31,8 @@ Guidelines:
 - OS: Arch Linux. Package manager is pacman (or yay for AUR). Do NOT use apt/apt-get/brew.
 - Python packages: install with pip inside the active virtualenv, not system pip.
 - The bash tool runs in a subprocess with NO TTY. Do NOT run interactive or terminal-UI programs (curses, pygame, ncurses, etc.) through bash — they will always fail with errors like "cbreak() returned ERR". Write the code and tell the user to run it themselves.
+- Games, TUIs, and any script with a game_loop/event_loop/main_loop CANNOT be tested via bash. They will always time out. When writing such programs: verify correctness by carefully reading the code, then tell the user to run it. NEVER attempt to run a game or interactive script through bash to "test" it.
+- If bash returns a timeout error: STOP immediately. Do NOT retry, do NOT add timeout mechanisms to the script, do NOT keep editing and re-running. A timeout means the program needs a TTY. Tell the user to run it directly.
 - GUI applications (file managers, text editors, browsers, etc.) CAN be launched through bash — the display environment (DISPLAY/WAYLAND_DISPLAY) is inherited. Launch them detached: `nohup thunar . &>/dev/null &`. Use xdg-open for generic file/URL opening. To open a file manager: try thunar, nautilus, dolphin, nemo, or pcmanfm in that order.
 - Project memory is stored in .vibe/memory.md — read it at the start of a session if it exists, \
 and update it with important decisions, file layouts, and current status so future sessions \

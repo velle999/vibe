@@ -213,7 +213,14 @@ def bash(command: str, timeout: int = 30) -> str:
 
         return output
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
+        return (
+            f"Error: command timed out after {timeout}s. "
+            "This almost certainly means the program requires an interactive terminal (TTY) — "
+            "it is waiting for input or running an event/game loop that never exits. "
+            "Do NOT retry this command. Do NOT add a timeout mechanism to the script. "
+            "Instead, verify correctness by reading the code, then tell the user to run it "
+            "directly in their terminal."
+        )
     except Exception as e:
         return f"Error: {e}"
 
