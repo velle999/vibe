@@ -2,7 +2,6 @@ import json
 import os
 import re
 import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Iterator
 
@@ -267,12 +266,14 @@ class VibeModel:
         )
 
     def _ollama_stream(self):
+        # Ollama does not emit tool_calls in streaming deltas (they appear only
+        # in non-streaming responses). Use non-streaming and simulate a stream.
         payload = json.dumps({
             "model": cfg.OLLAMA_MODEL,
             "messages": self._messages,
             "tools": TOOL_SCHEMAS,
             "tool_choice": "auto",
-            "stream": True,
+            "stream": False,
             "temperature": cfg.TEMPERATURE,
             "top_p": cfg.TOP_P,
             "top_k": cfg.TOP_K,
@@ -285,23 +286,26 @@ class VibeModel:
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=300) as resp:
-            buf = ""
-            for raw in resp:
-                buf += raw.decode()
-                # A single raw chunk may be a fragment of an SSE line —
-                # process only complete \n-terminated lines.
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    line = line.strip()
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        return
-                    try:
-                        yield json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+            result = json.loads(resp.read())
+
+        message = result["choices"][0]["message"]
+        reasoning = (message.get("reasoning") or "").strip()
+        content = (message.get("content") or "").strip()
+        tool_calls = message.get("tool_calls") or []
+
+        # Yield reasoning wrapped in think tags so the existing filter handles it
+        if reasoning:
+            chunk_text = f"<think>{reasoning}</think>"
+            yield {"choices": [{"delta": {"content": chunk_text}, "finish_reason": None}]}
+
+        # Yield content in small chunks for a streaming feel
+        if content:
+            for i in range(0, len(content), 20):
+                yield {"choices": [{"delta": {"content": content[i:i+20]}, "finish_reason": None}]}
+
+        # Yield tool calls as a single delta
+        if tool_calls:
+            yield {"choices": [{"delta": {"content": "", "tool_calls": tool_calls}, "finish_reason": "tool_calls"}]}
 
     def _emit_text(self, text: str) -> Iterator[str]:
         """Yield text through the think filter (or raw if thinking is on)."""

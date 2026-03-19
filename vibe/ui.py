@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
@@ -47,10 +48,17 @@ def get_input(cwd: str) -> str | None:
         return None
 
 
+_BUG = """\
+[#7c6af7]  ╱|  |╲[/]
+[#7c6af7] (  ˘ᴗ˘ )[/]  [bold #7c6af7]Vibe Code[/]
+[#7c6af7]  ╲|__|╱[/]  [dim]{model_label}[/]
+[#7c6af7]  ╱╱  ╲╲[/]\
+"""
+
+
 def print_welcome(model_label: str):
     console.print(Panel(
-        f"[bold #7c6af7]Vibe Code[/]\n"
-        f"[dim]Local AI coding assistant · {model_label}[/]\n\n"
+        _BUG.format(model_label=model_label) + "\n\n"
         "[dim]Commands: /reset  /save  /memory  /think  /nothink  /tokens  /sys  /gpu  /ps  /exit  /help[/]\n"
         "[dim]Tip: /save before /reset to keep session memory · Alt+Enter for newline[/]",
         border_style="#7c6af7",
@@ -155,6 +163,9 @@ def stream_response(token_iter) -> str:
     full_text = ""
     current_tool_name = ""
     pending = ""
+    t_start = time.monotonic()
+    think_elapsed: float | None = None
+    first_token = True
 
     console.print()  # blank line before response
 
@@ -162,6 +173,9 @@ def stream_response(token_iter) -> str:
     with console.status("[dim]thinking…[/]", spinner="dots") as status:
         try:
             for token in token_iter:
+                if first_token:
+                    think_elapsed = time.monotonic() - t_start
+                    first_token = False
                 # Stop the spinner as soon as content arrives
                 status.stop()
 
@@ -194,6 +208,8 @@ def stream_response(token_iter) -> str:
                     console.print()
 
                     # Restart spinner for the next model turn
+                    first_token = True
+                    t_start = time.monotonic()
                     status.start()
                     continue
 
@@ -213,6 +229,9 @@ def stream_response(token_iter) -> str:
         console.print(pending, end="", markup=False, highlight=False)
 
     console.print()
+    if think_elapsed is not None:
+        total = time.monotonic() - t_start + think_elapsed
+        console.print(f"[dim]⏱ thought for {think_elapsed:.1f}s · total {total:.1f}s[/]")
     return full_text
 
 
