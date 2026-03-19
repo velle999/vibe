@@ -139,12 +139,15 @@ def write_file(path: str, content: str) -> str:
     try:
         p.write_text(content, encoding="utf-8")
         lines = content.count("\n") + 1
+        _edit_success_counts.pop(str(p.resolve()), None)
         return f"Written {lines} lines to {path}"
     except Exception as e:
         return f"Error writing {path}: {e}"
 
 
 _edit_fail_counts: dict[str, int] = {}
+_edit_success_counts: dict[str, int] = {}
+_EDIT_CHURN_THRESHOLD = 5  # warn after this many successive edits to the same file
 
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
@@ -171,8 +174,18 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
             return f"Error: old_string matches {count} times in {path} — make it more specific"
         updated = original.replace(old_string, new_string, 1)
         p.write_text(updated, encoding="utf-8")
-        _edit_fail_counts.pop(str(p.resolve()), None)
-        return f"Replaced 1 occurrence in {path}"
+        key = str(p.resolve())
+        _edit_fail_counts.pop(key, None)
+        _edit_success_counts[key] = _edit_success_counts.get(key, 0) + 1
+        n = _edit_success_counts[key]
+        msg = f"Replaced 1 occurrence in {path}"
+        if n >= _EDIT_CHURN_THRESHOLD:
+            msg += (
+                f"\n\nNote: you have now made {n} successive edits to this file. "
+                f"If you are still building or fixing it, use write_file to rewrite the "
+                f"whole file at once — it is faster and less error-prone than many small edits."
+            )
+        return msg
     except Exception as e:
         return f"Error editing {path}: {e}"
 
