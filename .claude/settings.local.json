@@ -6,7 +6,8 @@
       "Bash(source /home/velle/vibe-code/.venv/bin/activate)",
       "Bash(pip install:*)",
       "Bash(python -c \"import pygame; print\\(''pygame'', pygame.__version__, ''OK''\\)\")",
-      "Bash(ollama list:*)"
+      "Bash(ollama list:*)",
+      "Bash(python3 -c \":*)"
     ]
   }
 }

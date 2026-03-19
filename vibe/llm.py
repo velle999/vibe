@@ -195,17 +195,23 @@ class VibeModel:
 
             # ── No tool calls → done ──────────────────────────────────────────
             if not tool_calls:
-                # Detect narration-without-action: model described what it will do
-                # but didn't call any tools. Nudge it once or twice to actually act.
-                if _autopush_remaining > 0 and _STALL_RE.search(assistant_text):
+                # Check for stall: empty response, think-only, or narration without action
+                _visible = re.sub(r"<think>[\s\S]*?</think>", "", assistant_text).strip()
+                _is_stall = (
+                    not _visible
+                    or len(_visible) < 30
+                    or _STALL_RE.search(_visible)
+                )
+                if _autopush_remaining > 0 and _is_stall:
                     _autopush_remaining -= 1
-                    self._messages.append({
-                        "role": "assistant",
-                        "content": assistant_text,
-                    })
+                    if assistant_text.strip():
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": assistant_text,
+                        })
                     self._messages.append({
                         "role": "user",
-                        "content": "/no_think Stop describing. Call write_file or bash now.",
+                        "content": "Use write_file to do this now. No text, just the tool call.",
                     })
                     self._think_filter = _ThinkFilter()
                     continue
@@ -267,13 +273,11 @@ class VibeModel:
             "tools": TOOL_SCHEMAS,
             "tool_choice": "auto",
             "stream": True,
-            "options": {
-                "temperature": cfg.TEMPERATURE,
-                "top_p": cfg.TOP_P,
-                "top_k": cfg.TOP_K,
-                "repeat_penalty": cfg.REPEAT_PENALTY,
-                "num_predict": cfg.MAX_TOKENS,
-            },
+            "temperature": cfg.TEMPERATURE,
+            "top_p": cfg.TOP_P,
+            "top_k": cfg.TOP_K,
+            "repeat_penalty": cfg.REPEAT_PENALTY,
+            "num_predict": cfg.MAX_TOKENS,
         }).encode()
         req = urllib.request.Request(
             f"{cfg.OLLAMA_HOST}/v1/chat/completions",
@@ -281,17 +285,23 @@ class VibeModel:
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=300) as resp:
+            buf = ""
             for raw in resp:
-                line = raw.decode().strip()
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data == "[DONE]":
-                    break
-                try:
-                    yield json.loads(data)
-                except json.JSONDecodeError:
-                    continue
+                buf += raw.decode()
+                # A single raw chunk may be a fragment of an SSE line —
+                # process only complete \n-terminated lines.
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        return
+                    try:
+                        yield json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
 
     def _emit_text(self, text: str) -> Iterator[str]:
         """Yield text through the think filter (or raw if thinking is on)."""
