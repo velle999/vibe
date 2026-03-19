@@ -42,6 +42,7 @@ def main():
         sys_info, gpu_info, net_info,
         ps_list, kill_process,
         service_control, services_list,
+        open_file_manager,
     )
 
     print_welcome(str(cfg.MODEL_PATH))
@@ -87,6 +88,12 @@ def main():
         if cmd == "/model":
             print_info(f"Model: {cfg.MODEL_PATH}")
             print_info(f"Context: {cfg.N_CTX} tokens  GPU layers: {cfg.N_GPU_LAYERS}")
+            continue
+
+        if cmd.startswith("/files"):
+            parts = raw.split(None, 1)
+            path = parts[1] if len(parts) > 1 else cwd
+            print_info(open_file_manager(path))
             continue
 
         if cmd == "/sys":

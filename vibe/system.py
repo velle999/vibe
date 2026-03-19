@@ -116,6 +116,29 @@ def service_control(name: str, action: str = "status") -> str:
     return out or f"[exit code {rc}]"
 
 
+def open_file_manager(path: str = ".") -> str:
+    managers = ["thunar", "nautilus", "dolphin", "nemo", "pcmanfm"]
+    for mgr in managers:
+        if shutil.which(mgr):
+            subprocess.Popen(
+                [mgr, path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return f"Opened {mgr} at {path}"
+    # Fallback: xdg-open
+    if shutil.which("xdg-open"):
+        subprocess.Popen(
+            ["xdg-open", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return f"Opened {path} with xdg-open"
+    return "No file manager found (tried: " + ", ".join(managers) + ", xdg-open)"
+
+
 def services_list(filter_str: str | None = None) -> str:
     out, rc = _run("systemctl list-units --type=service --state=running --no-pager --no-legend")
     if rc != 0:
