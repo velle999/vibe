@@ -191,9 +191,29 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 _BASH_MAX_LINES = 100
+_tty_blocked: set[str] = {}  # script paths that have already timed out this session
+
+_TTY_BLOCK_ERROR = (
+    "BLOCKED: This script has already timed out once this session, which means it requires "
+    "an interactive terminal (TTY). Running it again will not work. "
+    "Do NOT call bash on this script again. "
+    "Tell the user the script is complete and they should run it directly in their terminal."
+)
+
+
+def _extract_script_path(command: str) -> str | None:
+    """Return the script path if the command is executing a shell script file."""
+    import re
+    # Match: ./foo.sh, bash foo.sh, sh ./foo.sh, python foo.py, etc.
+    m = re.search(r'(?:^|(?:bash|sh|python3?|node|ruby|perl)\s+)(\.?\.?/?\S+\.(?:sh|py|js|rb|pl))', command)
+    return m.group(1) if m else None
 
 
 def bash(command: str, timeout: int = 30) -> str:
+    script = _extract_script_path(command)
+    if script and script in _tty_blocked:
+        return _TTY_BLOCK_ERROR
+
     try:
         result = subprocess.run(
             command,
@@ -235,13 +255,15 @@ def bash(command: str, timeout: int = 30) -> str:
 
         return output
     except subprocess.TimeoutExpired:
+        if script:
+            _tty_blocked.add(script)
         return (
             f"Error: command timed out after {timeout}s. "
-            "This almost certainly means the program requires an interactive terminal (TTY) — "
+            "This means the program requires an interactive terminal (TTY) — "
             "it is waiting for input or running an event/game loop that never exits. "
-            "Do NOT retry this command. Do NOT add a timeout mechanism to the script. "
-            "Instead, verify correctness by reading the code, then tell the user to run it "
-            "directly in their terminal."
+            "This script is now BLOCKED from running via bash for the rest of this session. "
+            "Do NOT retry. Do NOT modify the script to add timeouts. "
+            "Tell the user the script is ready and they should run it directly in their terminal."
         )
     except Exception as e:
         return f"Error: {e}"
