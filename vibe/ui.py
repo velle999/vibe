@@ -1,0 +1,205 @@
+import json
+import sys
+from pathlib import Path
+from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich import box
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
+
+HISTORY_FILE = Path.home() / ".vibe_history"
+
+console = Console()
+
+_prompt_style = Style.from_dict({
+    "prompt": "bold #7c6af7",
+})
+
+_bindings = KeyBindings()
+
+# Enter submits; Escape+Enter (Alt+Enter) inserts a newline
+@_bindings.add("enter")
+def _submit(event):
+    event.current_buffer.validate_and_handle()
+
+@_bindings.add("escape", "enter")
+def _newline(event):
+    event.current_buffer.insert_text("\n")
+
+_session = PromptSession(
+    history=FileHistory(str(HISTORY_FILE)),
+    style=_prompt_style,
+    mouse_support=False,
+    key_bindings=_bindings,
+    multiline=True,
+)
+
+
+def get_input(cwd: str) -> str | None:
+    """Get user input. Returns None on EOF/exit."""
+    try:
+        text = _session.prompt([("class:prompt", "vibe ❯ ")])
+        return text.strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def print_welcome(model_path: str):
+    console.print(Panel(
+        "[bold #7c6af7]Vibe Code[/]\n"
+        "[dim]Local AI coding assistant · Qwen3-8B · CUDA[/]\n\n"
+        "[dim]Commands: /reset  /save  /memory  /think  /nothink  /tokens  /exit  /help[/]\n"
+        "[dim]Tip: /save before /reset to keep session memory · Alt+Enter for newline[/]",
+        border_style="#7c6af7",
+        box=box.ROUNDED,
+        padding=(0, 2),
+    ))
+
+
+def print_help():
+    console.print(Panel(
+        "[bold]Commands[/]\n"
+        "  [cyan]/reset[/]    — clear conversation history\n"
+        "  [cyan]/think[/]    — enable Qwen3 chain-of-thought\n"
+        "  [cyan]/nothink[/]  — disable chain-of-thought (faster)\n"
+        "  [cyan]/save[/]     — summarize session to .vibe/memory.md\n"
+        "  [cyan]/memory[/]   — show current memory file\n"
+        "  [cyan]/tokens[/]   — show context token usage\n"
+        "  [cyan]/model[/]    — show current model info\n"
+        "  [cyan]/exit[/]     — quit\n"
+        "  [cyan]/help[/]     — show this\n\n"
+        "[bold]Tips[/]\n"
+        "  • Give a directory with:  [dim]vibe /path/to/project[/]\n"
+        "  • Up/Down arrow for history\n"
+        "  • Alt+Enter (Esc then Enter) for multiline input\n"
+        "  • Ctrl+C to cancel a response",
+        title="Help",
+        border_style="dim",
+        box=box.ROUNDED,
+    ))
+
+
+def print_tool_call(name: str, args: dict):
+    if name == "bash":
+        arg_str = args.get("command", "")
+        label = f"[bold yellow]❯[/] [yellow]{name}[/]  [dim]{arg_str[:80]}[/]"
+    elif name in ("read_file", "write_file", "edit_file"):
+        path = args.get("path", "")
+        label = f"[bold cyan]❯[/] [cyan]{name}[/]  [dim]{path}[/]"
+    elif name in ("glob", "grep"):
+        label = f"[bold green]❯[/] [green]{name}[/]  [dim]{args.get('pattern', '')}[/]"
+    else:
+        label = f"[bold blue]❯[/] [blue]{name}[/]  [dim]{json.dumps(args)[:80]}[/]"
+    console.print(label)
+
+
+def print_tool_result(result: str, name: str):
+    lines = result.strip().splitlines()
+    preview_lines = 6
+    if len(lines) <= preview_lines:
+        preview = result.strip()
+    else:
+        preview = "\n".join(lines[:preview_lines]) + f"\n… +{len(lines) - preview_lines} lines"
+
+    if name == "read_file":
+        # Try to syntax-highlight based on file extension in the result header
+        ext = ""
+        if lines and lines[0].startswith("<file path="):
+            import re
+            m = re.search(r'path=([^\s>]+)', lines[0])
+            if m:
+                ext = Path(m.group(1)).suffix.lstrip(".")
+        if ext:
+            try:
+                snippet = "\n".join(lines[1:preview_lines + 1])
+                console.print(Syntax(snippet, ext, theme="monokai", line_numbers=False))
+                if len(lines) > preview_lines + 1:
+                    console.print(f"  [dim]… +{len(lines) - preview_lines - 1} lines[/]")
+                return
+            except Exception:
+                pass
+
+    console.print(f"  [dim]{preview}[/]")
+
+
+def stream_response(token_iter) -> str:
+    """
+    Consume token iterator, handle tool markers, render output.
+    Returns the full assistant text.
+
+    Tool markers from llm.py use NUL-separated fields but the result
+    may itself contain NUL bytes, so we join everything after field 2.
+    """
+    full_text = ""
+    current_tool_name = ""
+    pending = ""
+
+    console.print()  # blank line before response
+
+    # Typing indicator — show something while waiting for first token
+    with console.status("[dim]thinking…[/]", spinner="dots") as status:
+        try:
+            for token in token_iter:
+                # Stop the spinner as soon as content arrives
+                status.stop()
+
+                # ── Tool signal: TOOL_START ───────────────────────────────────
+                if token.startswith("\x00TOOL_START\x00"):
+                    if pending:
+                        console.print(pending, end="", markup=False, highlight=False)
+                        full_text += pending
+                        pending = ""
+                    console.print()
+
+                    parts = token.split("\x00")
+                    # fields: ['', 'TOOL_START', name, args_json, '']
+                    name = parts[2] if len(parts) > 2 else "?"
+                    args_str = "\x00".join(parts[3:]).rstrip("\x00") if len(parts) > 3 else "{}"
+                    try:
+                        args = json.loads(args_str)
+                    except Exception:
+                        args = {}
+                    print_tool_call(name, args)
+                    current_tool_name = name
+                    continue
+
+                # ── Tool signal: TOOL_END ─────────────────────────────────────
+                if token.startswith("\x00TOOL_END\x00"):
+                    parts = token.split("\x00", 2)  # max 2 splits → ['', 'TOOL_END', result]
+                    result = parts[2] if len(parts) > 2 else ""
+                    print_tool_result(result, current_tool_name)
+                    current_tool_name = ""
+                    console.print()
+
+                    # Restart spinner for the next model turn
+                    status.start()
+                    continue
+
+                # ── Regular text token ────────────────────────────────────────
+                pending += token
+                full_text += token
+
+                if "\n" in pending or len(pending) > 40:
+                    console.print(pending, end="", markup=False, highlight=False)
+                    pending = ""
+
+        except KeyboardInterrupt:
+            console.print("\n[dim]interrupted[/]")
+
+    # Flush remainder
+    if pending:
+        console.print(pending, end="", markup=False, highlight=False)
+
+    console.print()
+    return full_text
+
+
+def print_error(msg: str):
+    console.print(f"[bold red]Error:[/] {msg}", markup=True)
+
+
+def print_info(msg: str):
+    console.print(f"[dim]{msg}[/]", markup=True)
