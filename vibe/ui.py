@@ -47,10 +47,10 @@ def get_input(cwd: str) -> str | None:
         return None
 
 
-def print_welcome(model_path: str):
+def print_welcome(model_label: str):
     console.print(Panel(
-        "[bold #7c6af7]Vibe Code[/]\n"
-        "[dim]Local AI coding assistant · Qwen3-8B · CUDA[/]\n\n"
+        f"[bold #7c6af7]Vibe Code[/]\n"
+        f"[dim]Local AI coding assistant · {model_label}[/]\n\n"
         "[dim]Commands: /reset  /save  /memory  /think  /nothink  /tokens  /sys  /gpu  /ps  /exit  /help[/]\n"
         "[dim]Tip: /save before /reset to keep session memory · Alt+Enter for newline[/]",
         border_style="#7c6af7",

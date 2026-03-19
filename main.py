@@ -45,7 +45,11 @@ def main():
         open_file_manager,
     )
 
-    print_welcome(str(cfg.MODEL_PATH))
+    if cfg.BACKEND == "ollama":
+        model_label = f"{cfg.OLLAMA_MODEL} · ollama"
+    else:
+        model_label = f"{cfg.MODEL_PATH.name} · llama-cpp"
+    print_welcome(model_label)
 
     # ── REPL ──────────────────────────────────────────────────────────────────
     while True:
