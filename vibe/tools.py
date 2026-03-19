@@ -209,7 +209,23 @@ def _extract_script_path(command: str) -> str | None:
     return m.group(1) if m else None
 
 
+_ECHO_WRITE_RE = re.compile(
+    r'(?:echo|printf)\s+.{10,}\s*>{1,2}\s*\S+'   # echo "..." > file
+    r'|cat\s*(?:<<[-\w]*|>)\s*\S'                # cat <<EOF > file  or  cat > file
+    , re.DOTALL
+)
+
+_ECHO_WRITE_ERROR = (
+    "BLOCKED: Do not use echo/printf/cat to write file content. "
+    "Use the write_file tool instead — it handles any file size and never truncates. "
+    "Call write_file with the complete file content now."
+)
+
+
 def bash(command: str, timeout: int = 30) -> str:
+    if _ECHO_WRITE_RE.search(command):
+        return _ECHO_WRITE_ERROR
+
     script = _extract_script_path(command)
     if script and script in _tty_blocked:
         return _TTY_BLOCK_ERROR
