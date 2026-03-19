@@ -123,6 +123,8 @@ class VibeModel:
         # streams don't leave it in a bad state
         self._think_filter = _ThinkFilter()
 
+        _autopush_remaining = 2  # max automatic nudges per user turn
+
         while True:
             # ── Call the model ────────────────────────────────────────────────
             stream = self._stream_completion()
@@ -193,6 +195,21 @@ class VibeModel:
 
             # ── No tool calls → done ──────────────────────────────────────────
             if not tool_calls:
+                # Detect narration-without-action: model described what it will do
+                # but didn't call any tools. Nudge it once or twice to actually act.
+                if _autopush_remaining > 0 and _STALL_RE.search(assistant_text):
+                    _autopush_remaining -= 1
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": assistant_text,
+                    })
+                    self._messages.append({
+                        "role": "user",
+                        "content": "/no_think Stop describing. Call write_file or bash now.",
+                    })
+                    self._think_filter = _ThinkFilter()
+                    continue
+
                 self._messages.append({
                     "role": "assistant",
                     "content": assistant_text,
@@ -287,6 +304,12 @@ class VibeModel:
 # ── Text tool-call parser ───────────────────────────────────────────────────────
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+
+# Detects "I'll write / Let me create / I will implement..." without any tool calls
+_STALL_RE = re.compile(
+    r"(?i)\b(i'?ll|let me|i will|i(?:'m| am) going to|i can|here(?:'s| is)(?: the| a)?)\b"
+    r"[\s\S]{0,120}\b(write|create|build|implement|generate|code|make|develop|add)\b"
+)
 
 
 def _parse_text_tool_calls(text: str) -> list[dict]:
