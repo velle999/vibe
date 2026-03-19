@@ -123,10 +123,12 @@ class VibeModel:
         self._think_filter = _ThinkFilter()
 
         _autopush_remaining = 2  # max automatic nudges per user turn
+        _force_tool = False      # force tool_choice="required" on next call
 
         while True:
             # ── Call the model ────────────────────────────────────────────────
-            stream = self._stream_completion()
+            stream = self._stream_completion(force_tool=_force_tool)
+            _force_tool = False
 
             # ── Collect streamed response ─────────────────────────────────────
             assistant_text = ""
@@ -213,6 +215,7 @@ class VibeModel:
                         "content": "Use write_file to do this now. No text, just the tool call.",
                     })
                     self._think_filter = _ThinkFilter()
+                    _force_tool = True  # next call must emit a tool call
                     continue
 
                 self._messages.append({
@@ -249,13 +252,14 @@ class VibeModel:
 
             # Loop: send tool results back to model
 
-    def _stream_completion(self):
+    def _stream_completion(self, force_tool: bool = False):
+        tool_choice = "required" if force_tool else "auto"
         if cfg.BACKEND == "ollama":
-            return self._ollama_stream()
+            return self._ollama_stream(tool_choice=tool_choice)
         return self._llm.create_chat_completion(
             messages=self._messages,
             tools=TOOL_SCHEMAS,
-            tool_choice="auto",
+            tool_choice=tool_choice,
             temperature=cfg.TEMPERATURE,
             top_p=cfg.TOP_P,
             top_k=cfg.TOP_K,
@@ -265,14 +269,14 @@ class VibeModel:
             stream=True,
         )
 
-    def _ollama_stream(self):
+    def _ollama_stream(self, tool_choice: str = "auto"):
         # Ollama does not emit tool_calls in streaming deltas (they appear only
         # in non-streaming responses). Use non-streaming and simulate a stream.
         payload = json.dumps({
             "model": cfg.OLLAMA_MODEL,
             "messages": self._messages,
             "tools": TOOL_SCHEMAS,
-            "tool_choice": "auto",
+            "tool_choice": tool_choice,
             "stream": False,
             "temperature": cfg.TEMPERATURE,
             "top_p": cfg.TOP_P,
