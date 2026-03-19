@@ -144,6 +144,9 @@ def write_file(path: str, content: str) -> str:
         return f"Error writing {path}: {e}"
 
 
+_edit_fail_counts: dict[str, int] = {}
+
+
 def edit_file(path: str, old_string: str, new_string: str) -> str:
     p = Path(path).expanduser()
     if not p.exists():
@@ -152,17 +155,23 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
         original = p.read_text(encoding="utf-8", errors="replace")
         count = original.count(old_string)
         if count == 0:
-            # Show a snippet so the model can see what's actually in the file
-            preview = original[:600].replace("\t", "→")
-            return (
-                f"Error: old_string not found in {path}. "
-                f"Do NOT retry edit_file — use write_file to rewrite the whole file instead. "
-                f"File starts with:\n{preview}"
+            key = str(p.resolve())
+            _edit_fail_counts[key] = _edit_fail_counts.get(key, 0) + 1
+            fails = _edit_fail_counts[key]
+            # Show the full file so the model has everything it needs for write_file
+            preview = original.replace("\t", "→")
+            header = (
+                f"STOP. edit_file has failed {fails} time(s) on {path}. "
+                f"old_string does not exist in the file. "
+                f"YOU MUST use write_file NOW — do not call edit_file again on this file. "
+                f"Here is the complete current file content to use as the base for write_file:\n\n"
             )
+            return header + preview
         if count > 1:
             return f"Error: old_string matches {count} times in {path} — make it more specific"
         updated = original.replace(old_string, new_string, 1)
         p.write_text(updated, encoding="utf-8")
+        _edit_fail_counts.pop(str(p.resolve()), None)
         return f"Replaced 1 occurrence in {path}"
     except Exception as e:
         return f"Error editing {path}: {e}"
