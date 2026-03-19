@@ -38,6 +38,12 @@ def main():
         print_error(f"Failed to load model: {e}")
         sys.exit(1)
 
+    from vibe.system import (
+        sys_info, gpu_info, net_info,
+        ps_list, kill_process,
+        service_control, services_list,
+    )
+
     print_welcome(str(cfg.MODEL_PATH))
 
     # ── REPL ──────────────────────────────────────────────────────────────────
@@ -53,6 +59,7 @@ def main():
 
         # Slash commands
         cmd = user_input.lower().strip()
+        raw = user_input.strip()
 
         if cmd in ("/exit", "/quit", "exit", "quit"):
             print_info("Bye!")
@@ -80,6 +87,75 @@ def main():
         if cmd == "/model":
             print_info(f"Model: {cfg.MODEL_PATH}")
             print_info(f"Context: {cfg.N_CTX} tokens  GPU layers: {cfg.N_GPU_LAYERS}")
+            continue
+
+        if cmd == "/sys":
+            print_info(sys_info())
+            continue
+
+        if cmd == "/gpu":
+            print_info(gpu_info())
+            continue
+
+        if cmd == "/net":
+            print_info(net_info())
+            continue
+
+        if cmd.startswith("/ps"):
+            parts = raw.split(None, 1)
+            filter_str = parts[1] if len(parts) > 1 else None
+            print_info(ps_list(filter_str))
+            continue
+
+        if cmd.startswith("/kill "):
+            target = raw.split(None, 1)[1].strip()
+            print_info(kill_process(target))
+            continue
+
+        if cmd.startswith("/service "):
+            parts = raw.split()
+            if len(parts) < 2:
+                print_error("Usage: /service <name> [status|start|stop|restart|reload|enable|disable]")
+            else:
+                name = parts[1]
+                action = parts[2] if len(parts) > 2 else "status"
+                print_info(service_control(name, action))
+            continue
+
+        if cmd.startswith("/services"):
+            parts = raw.split(None, 1)
+            filter_str = parts[1] if len(parts) > 1 else None
+            print_info(services_list(filter_str))
+            continue
+
+        if cmd.startswith("/set "):
+            parts = raw.split()
+            valid_params = {
+                "temp": ("TEMPERATURE", float, 0.0, 2.0),
+                "tokens": ("MAX_TOKENS", int, 64, 32768),
+                "top_p": ("TOP_P", float, 0.0, 1.0),
+                "top_k": ("TOP_K", int, 1, 200),
+                "repeat_penalty": ("REPEAT_PENALTY", float, 1.0, 2.0),
+            }
+            if len(parts) < 3:
+                opts = "  ".join(f"{k}" for k in valid_params)
+                print_error(f"Usage: /set <param> <value>  — params: {opts}")
+            else:
+                param, val_str = parts[1].lower(), parts[2]
+                if param not in valid_params:
+                    opts = ", ".join(valid_params)
+                    print_error(f"Unknown param '{param}'. Valid: {opts}")
+                else:
+                    attr, typ, lo, hi = valid_params[param]
+                    try:
+                        val = typ(val_str)
+                        if not (lo <= val <= hi):
+                            print_error(f"{param} must be between {lo} and {hi}")
+                        else:
+                            setattr(cfg, attr, val)
+                            print_info(f"{param} = {val}")
+                    except ValueError:
+                        print_error(f"Invalid value '{val_str}' for {param} (expected {typ.__name__})")
             continue
 
         if cmd == "/tokens":

@@ -43,17 +43,51 @@ This will:
 
 ## Slash Commands
 
-| Command    | Description                                        |
-|------------|----------------------------------------------------|
-| `/help`    | Show available commands                            |
-| `/think`   | Enable chain-of-thought reasoning (Qwen3 CoT)      |
-| `/nothink` | Disable chain-of-thought (faster, direct answers)  |
-| `/tokens`  | Show context usage with a visual bar               |
-| `/model`   | Show current model path and settings               |
-| `/save`    | Summarize the session to `.vibe/memory.md`         |
-| `/memory`  | Print current `.vibe/memory.md`                    |
-| `/reset`   | Clear conversation history                         |
-| `/exit`    | Quit                                               |
+**Conversation**
+
+| Command    | Description                                       |
+|------------|---------------------------------------------------|
+| `/reset`   | Clear conversation history                        |
+| `/think`   | Enable Qwen3 chain-of-thought reasoning           |
+| `/nothink` | Disable chain-of-thought (faster)                 |
+| `/tokens`  | Show context usage with a visual bar              |
+| `/model`   | Show current model path and settings              |
+| `/save`    | Summarize session to `.vibe/memory.md`            |
+| `/memory`  | Print current `.vibe/memory.md`                   |
+| `/exit`    | Quit                                              |
+| `/help`    | Show all commands                                 |
+
+**System Info**
+
+| Command           | Description                                     |
+|-------------------|-------------------------------------------------|
+| `/sys`            | CPU, RAM, disk usage, uptime                    |
+| `/gpu`            | GPU utilization, VRAM usage, temperature        |
+| `/net`            | Network interfaces and listening ports          |
+| `/ps [filter]`    | Top processes by CPU (optional name filter)     |
+
+**Process Control**
+
+| Command            | Description                                    |
+|--------------------|------------------------------------------------|
+| `/kill <pid\|name>` | Send SIGTERM to a PID or matching processes   |
+
+**Service Control**
+
+| Command                       | Description                              |
+|-------------------------------|------------------------------------------|
+| `/service <name> [action]`    | Control a systemd service (default: status). Actions: `start` `stop` `restart` `reload` `enable` `disable` |
+| `/services [filter]`          | List running services (optional filter)  |
+
+**Runtime Config**
+
+| Command                    | Description                              |
+|----------------------------|------------------------------------------|
+| `/set temp <0.0-2.0>`      | Generation temperature                   |
+| `/set tokens <n>`          | Max output tokens                        |
+| `/set top_p <0.0-1.0>`     | Nucleus sampling probability             |
+| `/set top_k <n>`           | Top-k sampling                           |
+| `/set repeat_penalty <n>`  | Repetition penalty                       |
 
 ## Models
 
