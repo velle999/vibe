@@ -1,8 +1,15 @@
 from pathlib import Path
 
-# Paths
+# Backend: "llama_cpp" or "ollama"
+BACKEND = "ollama"
+
+# Paths (llama_cpp backend)
 ROOT_DIR = Path(__file__).parent.parent
 MODEL_PATH = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
+
+# Ollama backend
+OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3.5:9b"
 
 # Model settings
 N_GPU_LAYERS = -1       # offload all layers to GPU
@@ -22,4 +29,4 @@ REPEAT_PENALTY = 1.1
 MAX_TOKENS = 8192
 
 # Qwen3 thinking mode: True = show CoT reasoning, False = /no_think
-THINKING = False
+THINKING = True

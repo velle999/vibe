@@ -5,7 +5,8 @@
       "Bash(python -c \"import llama_cpp; print\\(llama_cpp.__version__\\)\")",
       "Bash(source /home/velle/vibe-code/.venv/bin/activate)",
       "Bash(pip install:*)",
-      "Bash(python -c \"import pygame; print\\(''pygame'', pygame.__version__, ''OK''\\)\")"
+      "Bash(python -c \"import pygame; print\\(''pygame'', pygame.__version__, ''OK''\\)\")",
+      "Bash(ollama list:*)"
     ]
   }
 }

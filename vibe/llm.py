@@ -1,16 +1,12 @@
 import json
 import os
 import re
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Iterator
 
-from llama_cpp import Llama
-
 import vibe.config as cfg
-from .config import (
-    MODEL_PATH, N_GPU_LAYERS, N_CTX, N_THREADS, FLASH_ATTN, KV_CACHE_TYPE,
-    TEMPERATURE, TOP_P, TOP_K, MIN_P, REPEAT_PENALTY, MAX_TOKENS,
-)
 from .tools import TOOL_SCHEMAS, execute_tool
 
 
@@ -42,25 +38,43 @@ don't need to rediscover everything.
 
 class VibeModel:
     def __init__(self, verbose: bool = False):
-        if not MODEL_PATH.exists():
-            raise FileNotFoundError(
-                f"Model not found: {MODEL_PATH}\n"
-                "Run ./setup.sh to download it."
-            )
-
-        self._llm = Llama(
-            model_path=str(MODEL_PATH),
-            n_gpu_layers=N_GPU_LAYERS,
-            n_ctx=N_CTX,
-            n_threads=N_THREADS,
-            flash_attn=FLASH_ATTN,
-            type_k=KV_CACHE_TYPE,
-            type_v=KV_CACHE_TYPE,
-            verbose=verbose,
-        )
         self._messages: list[dict] = []
         self._think_filter = _ThinkFilter()
+        self._llm = None
+
+        if cfg.BACKEND == "ollama":
+            self._init_ollama()
+        else:
+            self._init_llama_cpp(verbose)
+
         self._reset_system()
+
+    def _init_llama_cpp(self, verbose: bool):
+        from llama_cpp import Llama
+        if not cfg.MODEL_PATH.exists():
+            raise FileNotFoundError(
+                f"Model not found: {cfg.MODEL_PATH}\n"
+                "Run ./setup.sh to download it."
+            )
+        self._llm = Llama(
+            model_path=str(cfg.MODEL_PATH),
+            n_gpu_layers=cfg.N_GPU_LAYERS,
+            n_ctx=cfg.N_CTX,
+            n_threads=cfg.N_THREADS,
+            flash_attn=cfg.FLASH_ATTN,
+            type_k=cfg.KV_CACHE_TYPE,
+            type_v=cfg.KV_CACHE_TYPE,
+            verbose=verbose,
+        )
+
+    def _init_ollama(self):
+        try:
+            urllib.request.urlopen(f"{cfg.OLLAMA_HOST}/api/tags", timeout=5)
+        except Exception as e:
+            raise RuntimeError(
+                f"Ollama not reachable at {cfg.OLLAMA_HOST}: {e}\n"
+                "Make sure ollama is running: ollama serve"
+            )
 
     def _reset_system(self):
         cwd = os.getcwd()
@@ -79,11 +93,11 @@ class VibeModel:
         self._reset_system()
 
     def token_count(self) -> int:
-        """Return approximate token count of current conversation."""
-        text = " ".join(
-            m.get("content", "") or "" for m in self._messages
-        )
-        return len(self._llm.tokenize(text.encode())) if text else 0
+        text = " ".join(m.get("content", "") or "" for m in self._messages)
+        if cfg.BACKEND == "llama_cpp" and self._llm:
+            return len(self._llm.tokenize(text.encode())) if text else 0
+        # ollama: rough estimate (4 chars ≈ 1 token)
+        return len(text) // 4
 
     def _user_content(self, text: str) -> str:
         """Prepend Qwen3 thinking-mode directive to user messages."""
@@ -109,18 +123,7 @@ class VibeModel:
 
         while True:
             # ── Call the model ────────────────────────────────────────────────
-            stream = self._llm.create_chat_completion(
-                messages=self._messages,
-                tools=TOOL_SCHEMAS,
-                tool_choice="auto",
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                top_k=TOP_K,
-                min_p=MIN_P,
-                repeat_penalty=REPEAT_PENALTY,
-                max_tokens=MAX_TOKENS,
-                stream=True,
-            )
+            stream = self._stream_completion()
 
             # ── Collect streamed response ─────────────────────────────────────
             assistant_text = ""
@@ -221,6 +224,55 @@ class VibeModel:
                 })
 
             # Loop: send tool results back to model
+
+    def _stream_completion(self):
+        if cfg.BACKEND == "ollama":
+            return self._ollama_stream()
+        return self._llm.create_chat_completion(
+            messages=self._messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=cfg.TEMPERATURE,
+            top_p=cfg.TOP_P,
+            top_k=cfg.TOP_K,
+            min_p=cfg.MIN_P,
+            repeat_penalty=cfg.REPEAT_PENALTY,
+            max_tokens=cfg.MAX_TOKENS,
+            stream=True,
+        )
+
+    def _ollama_stream(self):
+        payload = json.dumps({
+            "model": cfg.OLLAMA_MODEL,
+            "messages": self._messages,
+            "tools": TOOL_SCHEMAS,
+            "tool_choice": "auto",
+            "stream": True,
+            "options": {
+                "temperature": cfg.TEMPERATURE,
+                "top_p": cfg.TOP_P,
+                "top_k": cfg.TOP_K,
+                "repeat_penalty": cfg.REPEAT_PENALTY,
+                "num_predict": cfg.MAX_TOKENS,
+            },
+        }).encode()
+        req = urllib.request.Request(
+            f"{cfg.OLLAMA_HOST}/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            for raw in resp:
+                line = raw.decode().strip()
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError:
+                    continue
 
     def _emit_text(self, text: str) -> Iterator[str]:
         """Yield text through the think filter (or raw if thinking is on)."""

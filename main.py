@@ -86,8 +86,11 @@ def main():
             continue
 
         if cmd == "/model":
-            print_info(f"Model: {cfg.MODEL_PATH}")
-            print_info(f"Context: {cfg.N_CTX} tokens  GPU layers: {cfg.N_GPU_LAYERS}")
+            if cfg.BACKEND == "ollama":
+                print_info(f"Backend: ollama  Model: {cfg.OLLAMA_MODEL}  Host: {cfg.OLLAMA_HOST}")
+            else:
+                print_info(f"Backend: llama_cpp  Model: {cfg.MODEL_PATH}")
+                print_info(f"Context: {cfg.N_CTX} tokens  GPU layers: {cfg.N_GPU_LAYERS}")
             continue
 
         if cmd.startswith("/files"):

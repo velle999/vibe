@@ -1,22 +1,47 @@
 # Vibe Code
 
-A local AI coding assistant powered by [llama.cpp](https://github.com/ggerganov/llama.cpp) + CUDA. Runs entirely on your machine — no API keys, no cloud.
+A local AI coding assistant. Runs entirely on your machine — no API keys, no cloud.
+
+Supports two backends: **ollama** (recommended, easy model management) and **llama-cpp** (direct GGUF, full CUDA control).
 
 ## Features
 
 - Agentic tool-call loop: reads files, writes files, edits files, runs bash commands, globs, greps
-- Qwen3 thinking mode (chain-of-thought reasoning, toggleable at runtime)
+- System control: GPU stats, process management, systemd services, network info
+- Qwen3/Qwen3.5 thinking mode (chain-of-thought reasoning, toggleable at runtime)
 - Streaming output with Rich UI
 - Session memory via `/save` → `.vibe/memory.md`
 - Context usage tracking with visual bar
+- Opens GUI apps and file managers directly
 
 ## Requirements
 
 - Arch Linux (setup script uses pacman)
-- NVIDIA GPU with CUDA support (~12GB VRAM for 8B Q8_0 at 32k context)
+- NVIDIA GPU with CUDA support
 - Python 3.12+
+- [ollama](https://ollama.com) (recommended) or llama-cpp-python with CUDA
 
 ## Setup
+
+### Ollama (recommended)
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3.5:9b
+```
+
+Set in `vibe/config.py`:
+```python
+BACKEND = "ollama"
+OLLAMA_MODEL = "qwen3.5:9b"
+```
+
+Then launch:
+```bash
+./vibe.sh
+```
+
+### llama-cpp (direct GGUF)
 
 ```bash
 bash setup.sh
@@ -28,13 +53,19 @@ This will:
 3. Build `llama-cpp-python` with CUDA support
 4. Download `Qwen3-8B-Q8_0.gguf` (~8.5GB) into `models/`
 
+Set in `vibe/config.py`:
+```python
+BACKEND = "llama_cpp"
+MODEL_PATH = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
+```
+
 ## Usage
 
 ```bash
-# Activate venv and launch
+# Launch
 ./vibe.sh
 
-# Or point it at a project directory
+# Point at a project directory
 ./vibe.sh ~/my-project
 
 # Verbose mode (shows tracebacks)
@@ -48,10 +79,10 @@ This will:
 | Command    | Description                                       |
 |------------|---------------------------------------------------|
 | `/reset`   | Clear conversation history                        |
-| `/think`   | Enable Qwen3 chain-of-thought reasoning           |
+| `/think`   | Enable chain-of-thought reasoning                 |
 | `/nothink` | Disable chain-of-thought (faster)                 |
 | `/tokens`  | Show context usage with a visual bar              |
-| `/model`   | Show current model path and settings              |
+| `/model`   | Show current backend and model info               |
 | `/save`    | Summarize session to `.vibe/memory.md`            |
 | `/memory`  | Print current `.vibe/memory.md`                   |
 | `/exit`    | Quit                                              |
@@ -65,19 +96,15 @@ This will:
 | `/gpu`            | GPU utilization, VRAM usage, temperature        |
 | `/net`            | Network interfaces and listening ports          |
 | `/ps [filter]`    | Top processes by CPU (optional name filter)     |
+| `/files [path]`   | Open file manager (default: cwd)                |
 
-**Process Control**
+**Process & Service Control**
 
-| Command            | Description                                    |
-|--------------------|------------------------------------------------|
-| `/kill <pid\|name>` | Send SIGTERM to a PID or matching processes   |
-
-**Service Control**
-
-| Command                       | Description                              |
-|-------------------------------|------------------------------------------|
-| `/service <name> [action]`    | Control a systemd service (default: status). Actions: `start` `stop` `restart` `reload` `enable` `disable` |
-| `/services [filter]`          | List running services (optional filter)  |
+| Command                        | Description                                    |
+|--------------------------------|------------------------------------------------|
+| `/kill <pid\|name>`            | Send SIGTERM to a PID or matching processes    |
+| `/service <name> [action]`     | systemctl control (default: status). Actions: `start` `stop` `restart` `reload` `enable` `disable` |
+| `/services [filter]`           | List running services                          |
 
 **Runtime Config**
 
@@ -89,11 +116,28 @@ This will:
 | `/set top_k <n>`           | Top-k sampling                           |
 | `/set repeat_penalty <n>`  | Repetition penalty                       |
 
-## Models
+## Configuration
 
-Default: `models/Qwen3-8B-Q8_0.gguf`
+`vibe/config.py`:
 
-To use a different model, change `MODEL_PATH` in `vibe/config.py`.
+```python
+# Backend
+BACKEND      = "ollama"      # "ollama" or "llama_cpp"
+
+# Ollama
+OLLAMA_HOST  = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3.5:9b"
+
+# llama-cpp
+MODEL_PATH   = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
+N_CTX        = 32768         # context window (tokens)
+N_GPU_LAYERS = -1            # GPU layers (-1 = all)
+
+# Generation (both backends)
+TEMPERATURE  = 0.6
+MAX_TOKENS   = 8192
+THINKING     = True          # chain-of-thought on by default
+```
 
 ## Project Structure
 
@@ -101,23 +145,12 @@ To use a different model, change `MODEL_PATH` in `vibe/config.py`.
 vibe-code/
 ├── main.py          # REPL entry point, slash command handling
 ├── vibe/
-│   ├── config.py    # Model path, generation params, THINKING flag
-│   ├── llm.py       # VibeModel class — agentic tool-call loop, thinking filter
+│   ├── config.py    # Backend selection, model paths, generation params
+│   ├── llm.py       # VibeModel — agentic loop, ollama + llama-cpp backends
 │   ├── tools.py     # Tool schemas + implementations (read, write, edit, bash, glob, grep, ls)
+│   ├── system.py    # System commands (gpu, ps, services, file manager, etc.)
 │   └── ui.py        # Rich console UI, prompt_toolkit session, streaming renderer
-├── setup.sh         # One-shot setup script
+├── setup.sh         # llama-cpp setup script
 ├── vibe.sh          # Launch wrapper
 └── requirements.txt
-```
-
-## Configuration
-
-Edit `vibe/config.py` to tune generation settings:
-
-```python
-N_CTX        = 32768   # context window (tokens)
-N_GPU_LAYERS = -1      # GPU layers (-1 = all)
-TEMPERATURE  = 0.6
-MAX_TOKENS   = 8192
-THINKING     = False   # chain-of-thought off by default
 ```
