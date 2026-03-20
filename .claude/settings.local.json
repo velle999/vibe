@@ -18,7 +18,8 @@
       "Bash(python -c \"from vibe.system import sys_info, kill_process; print\\(''system OK''\\)\")",
       "Bash(chmod +x /home/velle/vibe-code/Tetris.sh)",
       "Bash(bash -n /home/velle/vibe-code/Tetris.sh)",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''vibe/llm.py''\\).read\\(\\)\\); print\\(''OK''\\)\")"
     ]
   }
 }

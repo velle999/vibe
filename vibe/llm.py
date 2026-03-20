@@ -363,10 +363,14 @@ class VibeModel:
                 # comment, write it automatically (model can't do it via tool call)
                 _saved = _auto_save_code_blocks(_visible)
                 if _saved:
+                    # If multiple blocks found, keep only the largest one
+                    # (model often outputs explanation snippets alongside the main file)
+                    if len(_saved) > 1:
+                        _saved = [max(_saved, key=lambda x: len(x[1]))]
+
+                    from .tools import write_file as _write_file
                     fake_tool_calls = []
                     tool_results = []
-                    from .tools import write_file as _write_file
-                    _needs_review = False
                     for i, (path, content) in enumerate(_saved):
                         tc_id = f"auto_{i}"
                         fake_tool_calls.append({
@@ -385,19 +389,15 @@ class VibeModel:
                             "tool_call_id": tc_id,
                             "content": actual,
                         })
-                        if content.count("\n") >= 80:
-                            _needs_review = True
-                    # Assistant message (with tool_calls) FIRST, then tool results
+                    # Record in history so the model knows the file exists
                     self._messages.append({
                         "role": "assistant",
                         "content": assistant_text or None,
                         "tool_calls": fake_tool_calls,
                     })
                     self._messages.extend(tool_results)
-                    if _needs_review:
-                        # Continue the loop — the write_file result includes
-                        # a review nudge, so the model will read and verify
-                        continue
+                    # Done — don't loop back for review on auto-saved files.
+                    # The model can't reliably self-review via the fallback path.
                     return
 
                 # Don't stall-detect if there's a substantial code block
@@ -618,7 +618,10 @@ _STALL_RE = re.compile(
 )
 
 
-_CODE_BLOCK_RE = re.compile(r"```(\w+)?\s*\n([\s\S]+?)```", re.MULTILINE)
+# Matches fenced code blocks (closed with ```)
+_CODE_BLOCK_CLOSED_RE = re.compile(r"```(\w+)?\s*\n([\s\S]+?)```")
+# Matches unclosed code blocks (model ran out of tokens before closing)
+_CODE_BLOCK_OPEN_RE = re.compile(r"```(\w+)?\s*\n([\s\S]+)")
 # Matches: # file: name.py, // file: name.js, -- file: name.sql, /* file: name.c */
 _FILE_COMMENT_RE = re.compile(
     r'^(?:#|//|--|/\*)\s*(?:file|filename|path):\s*(\S+)', re.MULTILINE
@@ -678,14 +681,16 @@ def _infer_filename_from_code(code: str, lang_tag: str | None) -> str | None:
 def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
     """
     Find fenced code blocks and return (path, content) pairs.
-    Search order:
-      1. # file: comment in first 5 lines of code
-      2. Filename hint in surrounding text (1500 chars before/after)
-      3. Filename anywhere in the full text
-      4. Infer from language tag / shebang
+    Tries closed blocks first, then falls back to unclosed blocks
+    (model ran out of tokens before closing with ```).
     """
+    # Try closed blocks first; if none found, try unclosed
+    matches = list(_CODE_BLOCK_CLOSED_RE.finditer(text))
+    if not matches:
+        matches = list(_CODE_BLOCK_OPEN_RE.finditer(text))
+
     results = []
-    for m in _CODE_BLOCK_RE.finditer(text):
+    for m in matches:
         lang_tag = m.group(1)  # e.g. "python", "bash", or None
         code = m.group(2).strip()
         if len(code) < 20:
