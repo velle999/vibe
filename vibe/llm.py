@@ -120,6 +120,16 @@ class VibeModel:
         self._think_filter = _ThinkFilter()
         self._reset_system()
 
+    def reload(self, verbose: bool | None = None):
+        """Re-initialize the backend (e.g. after changing GPU layer count)."""
+        if verbose is None:
+            verbose = self._verbose
+        if cfg.BACKEND == "ollama":
+            self._init_ollama()
+        else:
+            self._init_llama_cpp(verbose)
+        self._reset_system()
+
     def token_count(self) -> int:
         text = " ".join(m.get("content", "") or "" for m in self._messages)
         if cfg.BACKEND == "llama_cpp" and self._llm:
@@ -198,6 +208,7 @@ class VibeModel:
                     "temperature": cfg.TEMPERATURE,
                     "num_predict": cfg.MAX_TOKENS,
                     "num_ctx": cfg.OLLAMA_CTX,
+                    "num_gpu": cfg.OLLAMA_NUM_GPU,
                 },
             }).encode()
             req = urllib.request.Request(
@@ -521,6 +532,7 @@ class VibeModel:
                 "repeat_penalty": cfg.REPEAT_PENALTY,
                 "num_predict": cfg.MAX_TOKENS,
                 "num_ctx": cfg.OLLAMA_CTX,
+                "num_gpu": cfg.OLLAMA_NUM_GPU,
             },
         }
         if not no_tools:

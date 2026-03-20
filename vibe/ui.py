@@ -90,6 +90,7 @@ def print_help():
         "                           actions: start stop restart reload enable disable\n"
         "  [cyan]/services [filter][/]     — list running services\n\n"
         "[bold]Runtime Config[/]\n"
+        "  [cyan]/offload <n>[/]           — GPU layers (-1=all, 0=CPU only, N=partial)\n"
         "  [cyan]/set temp <0.0-2.0>[/]   — generation temperature\n"
         "  [cyan]/set tokens <n>[/]        — max output tokens\n"
         "  [cyan]/set top_p <0.0-1.0>[/]  — nucleus sampling\n"

@@ -109,7 +109,43 @@ def _show_tokens(model: VibeModel):
         console.print("  [yellow]Warning: context is getting full. Consider /reset or /save then /reset.[/]")
 
 
-def _handle_set(args: str):
+def _handle_offload(args: str, model: VibeModel):
+    """Set GPU layer count and reload the model."""
+    args = args.strip()
+    if not args:
+        # Show current state
+        if cfg.BACKEND == "ollama":
+            n = cfg.OLLAMA_NUM_GPU
+        else:
+            n = cfg.N_GPU_LAYERS
+        label = "all" if n == -1 else ("CPU only" if n == 0 else f"{n} layers")
+        print_info(f"GPU offload: {label}")
+        print_info("Usage: /offload <n>  (-1 = all GPU, 0 = CPU only, N = N layers on GPU)")
+        return
+
+    try:
+        n = int(args)
+    except ValueError:
+        print_error("Expected a number: -1 (all GPU), 0 (CPU only), or N (layers on GPU)")
+        return
+
+    if cfg.BACKEND == "ollama":
+        cfg.OLLAMA_NUM_GPU = n
+        label = "all" if n == -1 else ("CPU only" if n == 0 else f"{n} layers")
+        print_info(f"Ollama GPU layers set to: {label}")
+        print_info("Takes effect on next request (Ollama reloads the model automatically).")
+    else:
+        cfg.N_GPU_LAYERS = n
+        label = "all" if n == -1 else ("CPU only" if n == 0 else f"{n} layers")
+        print_info(f"Reloading model with GPU layers: {label} ...")
+        try:
+            model.reload()
+            print_info("Model reloaded.")
+        except Exception as e:
+            print_error(f"Reload failed: {e}")
+
+
+
     parts = args.strip().split(None, 1)
     if len(parts) < 2:
         print_error("Usage: /set <param> <value>  (temp, tokens, top_p, top_k, repeat_penalty)")
@@ -195,9 +231,13 @@ def main():
                     console.print(f"  Model:   {cfg.OLLAMA_MODEL}")
                     console.print(f"  Host:    {cfg.OLLAMA_HOST}")
                     console.print(f"  Context: {cfg.OLLAMA_CTX:,}")
+                    n = cfg.OLLAMA_NUM_GPU
                 else:
                     console.print(f"  Model:   {cfg.MODEL_PATH.name}")
                     console.print(f"  Context: {cfg.N_CTX:,}")
+                    n = cfg.N_GPU_LAYERS
+                gpu_label = "all" if n == -1 else ("CPU only" if n == 0 else f"{n} layers")
+                console.print(f"  GPU:     {gpu_label}")
                 console.print(f"  Temp:    {cfg.TEMPERATURE}")
                 console.print(f"  Tokens:  {cfg.MAX_TOKENS:,}")
                 console.print(f"  Think:   {'on' if cfg.THINKING else 'off'}")
@@ -232,6 +272,8 @@ def main():
                     console.print(service_control(name, action))
             elif cmd == "/services":
                 console.print(services_list(rest or None))
+            elif cmd == "/offload":
+                _handle_offload(rest, model)
             elif cmd == "/set":
                 _handle_set(rest)
             else:
