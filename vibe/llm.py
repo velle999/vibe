@@ -205,13 +205,36 @@ class VibeModel:
                 # comment, write it automatically (model can't do it via tool call)
                 _saved = _auto_save_code_blocks(_visible)
                 if _saved:
-                    for path, content in _saved:
-                        result = f"Written {content.count(chr(10))+1} lines to {path}"
+                    # Build fake tool_calls and results so the model knows
+                    # files were written and can edit them on future turns
+                    fake_tool_calls = []
+                    tool_results = []
+                    from .tools import write_file as _write_file
+                    for i, (path, content) in enumerate(_saved):
+                        tc_id = f"auto_{i}"
+                        fake_tool_calls.append({
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json.dumps({"path": path, "content": "..."}),
+                            },
+                        })
                         yield f"\x00TOOL_START\x00write_file\x00{json.dumps({'path': path, 'content': content})}\x00"
-                        from .tools import write_file as _write_file
                         actual = _write_file(path, content)
                         yield f"\x00TOOL_END\x00{actual}\x00"
-                    self._messages.append({"role": "assistant", "content": assistant_text})
+                        tool_results.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": actual,
+                        })
+                    # Assistant message (with tool_calls) FIRST, then tool results
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": assistant_text or None,
+                        "tool_calls": fake_tool_calls,
+                    })
+                    self._messages.extend(tool_results)
                     return
 
                 _is_stall = (
@@ -329,6 +352,16 @@ class VibeModel:
         content = (message.get("content") or "").strip()
         tool_calls = message.get("tool_calls") or []
 
+        # Normalise tool_calls: ensure arguments is always a JSON string,
+        # add index field, and ensure id exists (ollama can omit these)
+        for i, tc in enumerate(tool_calls):
+            tc.setdefault("index", i)
+            tc.setdefault("id", f"ollama_{i}")
+            fn = tc.get("function", {})
+            args = fn.get("arguments", "{}")
+            if not isinstance(args, str):
+                fn["arguments"] = json.dumps(args)
+
         # Emit reasoning as one think block (if thinking mode on)
         if reasoning and cfg.THINKING:
             yield {"choices": [{"delta": {"content": f"<think>{reasoning}</think>"}, "finish_reason": None}]}
@@ -371,16 +404,25 @@ _STALL_RE = re.compile(
 
 
 _CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\s*\n([\s\S]+?)```", re.MULTILINE)
-_FILE_COMMENT_RE = re.compile(r'^#\s*(?:file|filename|path):\s*(\S+)', re.MULTILINE)
-_FILENAME_HINT_RE = re.compile(
-    r'[`*]{1,2}([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h))[`*]{1,2}'
+# Matches: # file: name.py, // file: name.js, -- file: name.sql, /* file: name.c */
+_FILE_COMMENT_RE = re.compile(
+    r'^(?:#|//|--|/\*)\s*(?:file|filename|path):\s*(\S+)', re.MULTILINE
+)
+# Matches filenames in backticks/bold: `tetris.py`, *game.sh*
+_FILENAME_HINT_STYLED_RE = re.compile(
+    r'[`*]{1,2}([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h|html|css|json|yaml|yml|toml))[`*]{1,2}'
+)
+# Matches bare filenames in surrounding prose: "updated tetris.py:" or "save as game.sh"
+_FILENAME_HINT_BARE_RE = re.compile(
+    r'(?:^|[\s(])([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h|html|css|json|yaml|yml|toml))(?=[:\s),]|$)',
+    re.MULTILINE,
 )
 
 
 def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
     """
     Find fenced code blocks and return (path, content) pairs.
-    Checks: # file: comment anywhere in first 5 lines, then context hints.
+    Checks: file-comment in first 5 lines → styled filename hint → bare filename hint.
     """
     results = []
     for m in _CODE_BLOCK_RE.finditer(text):
@@ -388,20 +430,30 @@ def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
         if len(code) < 20:
             continue
 
-        # 1. Look for "# file: name" in the first 5 lines of the code
+        # Strip the file comment from the saved content (it's metadata, not code)
         first_lines = "\n".join(code.splitlines()[:5])
         fc = _FILE_COMMENT_RE.search(first_lines)
         if fc:
             path = fc.group(1)
+            # Remove the comment line from the code
+            code_lines = code.splitlines()
+            for i, line in enumerate(code_lines[:5]):
+                if _FILE_COMMENT_RE.match(line):
+                    code_lines.pop(i)
+                    break
+            code = "\n".join(code_lines)
         else:
-            # 2. Look for filename hint in surrounding text (before or after block)
+            # Look for filename hint in surrounding text (300 chars before/after block)
             before = text[max(0, m.start() - 300):m.start()]
             after = text[m.end():m.end() + 300]
-            hint = _FILENAME_HINT_RE.search(before) or _FILENAME_HINT_RE.search(after)
-            if hint:
-                path = hint.group(1)
-            else:
-                continue  # no filename found
+            path = None
+            for regex in (_FILENAME_HINT_STYLED_RE, _FILENAME_HINT_BARE_RE):
+                hit = regex.search(before) or regex.search(after)
+                if hit:
+                    path = hit.group(1)
+                    break
+            if not path:
+                continue
         results.append((path, code))
     return results
 
