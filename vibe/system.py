@@ -90,13 +90,17 @@ def ps_list(filter_str: str | None = None) -> str:
 
 
 def kill_process(target: str) -> str:
+    import shlex
+    target = target.strip()
+    if not target:
+        return "Error: no target specified."
     if target.isdigit():
         out, rc = _run(f"kill {target}")
         if rc == 0:
             return f"Sent SIGTERM to PID {target}."
         return f"kill {target}: {out or f'failed (exit {rc})'}"
     else:
-        out, rc = _run(f"pkill -f {target!r}")
+        out, rc = _run(f"pkill -f {shlex.quote(target)}")
         if rc == 0:
             return f"Sent SIGTERM to processes matching '{target}'."
         return f"pkill '{target}': {out or 'no matching processes'}"

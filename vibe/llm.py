@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import urllib.error
 import urllib.request
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -37,12 +39,16 @@ and update it with important decisions, file layouts, and current status so futu
 don't need to rediscover everything.
 {memory_section}"""
 
+# ── Max tool-call loop iterations to prevent runaway agents ──────────────────
+_MAX_TOOL_LOOPS = 25
+
 
 class VibeModel:
     def __init__(self, verbose: bool = False):
         self._messages: list[dict] = []
         self._think_filter = _ThinkFilter()
         self._llm = None
+        self._verbose = verbose
 
         if cfg.BACKEND == "ollama":
             self._init_ollama()
@@ -83,9 +89,12 @@ class VibeModel:
         memory_path = Path(cwd) / ".vibe" / "memory.md"
         memory_section = ""
         if memory_path.exists():
-            content = memory_path.read_text(encoding="utf-8").strip()
-            if content:
-                memory_section = f"\n## Memory from previous sessions\n{content}\n"
+            try:
+                content = memory_path.read_text(encoding="utf-8").strip()
+                if content:
+                    memory_section = f"\n## Memory from previous sessions\n{content}\n"
+            except Exception:
+                pass
         system_content = SYSTEM_PROMPT.format(cwd=cwd, memory_section=memory_section)
         self._messages = [
             {"role": "system", "content": system_content}
@@ -98,27 +107,122 @@ class VibeModel:
     def token_count(self) -> int:
         text = " ".join(m.get("content", "") or "" for m in self._messages)
         if cfg.BACKEND == "llama_cpp" and self._llm:
-            return len(self._llm.tokenize(text.encode())) if text else 0
-        # ollama: rough estimate (4 chars ≈ 1 token)
+            try:
+                return len(self._llm.tokenize(text.encode())) if text else 0
+            except Exception:
+                pass
+        # ollama / fallback: rough estimate (4 chars ≈ 1 token)
         return len(text) // 4
+
+    @property
+    def context_limit(self) -> int:
+        return cfg.OLLAMA_CTX if cfg.BACKEND == "ollama" else cfg.N_CTX
+
+    def _prune_messages(self):
+        """
+        Sliding-window pruning: keep the system prompt and the most recent
+        messages that fit within ~75% of the context window.  Older messages
+        are dropped in pairs (user+assistant) so the history stays coherent.
+        """
+        budget = int(self.context_limit * 0.75)
+        if self.token_count() <= budget:
+            return
+
+        # Always keep the system prompt (index 0)
+        system = self._messages[:1]
+        rest = self._messages[1:]
+
+        # Walk backwards, accumulating token cost, until we hit the budget
+        kept: list[dict] = []
+        chars = 0
+        char_budget = budget * 4  # rough: 1 token ≈ 4 chars
+        for msg in reversed(rest):
+            msg_chars = len(msg.get("content") or "")
+            if chars + msg_chars > char_budget and kept:
+                break
+            kept.append(msg)
+            chars += msg_chars
+
+        kept.reverse()
+
+        # If we dropped anything, inject a continuity note
+        dropped = len(rest) - len(kept)
+        if dropped > 0:
+            kept.insert(0, {
+                "role": "system",
+                "content": (
+                    f"[{dropped} earlier messages were pruned to fit context. "
+                    "The conversation continues below.]"
+                ),
+            })
+
+        self._messages = system + kept
 
     def _user_content(self, text: str) -> str:
         """Prepend Qwen3 thinking-mode directive to user messages."""
         directive = "" if cfg.THINKING else "/no_think "
         return directive + text
 
+    def summarize(self, user_text: str) -> Iterator[str]:
+        """
+        Tool-free summarization: sends a message without tool schemas so the
+        model can't accidentally call tools during /save.
+        """
+        msgs = self._messages + [
+            {"role": "user", "content": self._user_content(user_text)}
+        ]
+
+        if cfg.BACKEND == "ollama":
+            # Non-streaming, no tools
+            payload = json.dumps({
+                "model": cfg.OLLAMA_MODEL,
+                "messages": msgs,
+                "stream": False,
+                "options": {
+                    "temperature": cfg.TEMPERATURE,
+                    "num_predict": cfg.MAX_TOKENS,
+                    "num_ctx": cfg.OLLAMA_CTX,
+                },
+            }).encode()
+            req = urllib.request.Request(
+                f"{cfg.OLLAMA_HOST}/v1/chat/completions",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=cfg.OLLAMA_TIMEOUT) as resp:
+                    result = json.loads(resp.read())
+                content = result["choices"][0]["message"].get("content", "")
+                yield content
+            except Exception as e:
+                yield f"[summarization failed: {e}]"
+        else:
+            # llama-cpp: create completion without tools
+            for chunk in self._llm.create_chat_completion(
+                messages=msgs,
+                temperature=cfg.TEMPERATURE,
+                max_tokens=cfg.MAX_TOKENS,
+                stream=True,
+            ):
+                delta = chunk["choices"][0].get("delta", {})
+                if delta.get("content"):
+                    yield delta["content"]
+
     def chat(self, user_text: str) -> Iterator[str]:
         """
         Send a user message and yield text tokens as they stream.
         Handles the full tool-call agentic loop internally.
         Yields special markers:
-          - "\x00TOOL_START\x00{name}\x00{json_args}\x00"  — tool about to run
-          - "\x00TOOL_END\x00{result}\x00"                 — tool result
+          - "\\x00TOOL_START\\x00{name}\\x00{json_args}\\x00"  — tool about to run
+          - "\\x00TOOL_END\\x00{result}\\x00"                 — tool result
         """
         self._messages.append({
             "role": "user",
             "content": self._user_content(user_text),
         })
+
+        # Prune before sending to avoid context overflow
+        self._prune_messages()
 
         # Reset think filter at the start of each turn so interrupted
         # streams don't leave it in a bad state
@@ -127,10 +231,25 @@ class VibeModel:
         _autopush_remaining = 2  # max automatic nudges per user turn
         _force_tool = False      # force tool_choice="required" on next call
         _original_user_text = user_text  # saved for clean retry
+        _loop_count = 0
 
         while True:
+            _loop_count += 1
+            if _loop_count > _MAX_TOOL_LOOPS:
+                yield "\n[max tool iterations reached — stopping]\n"
+                return
+
             # ── Call the model ────────────────────────────────────────────────
-            stream = self._stream_completion(force_tool=_force_tool)
+            try:
+                stream = self._stream_completion(force_tool=_force_tool)
+            except Exception as e:
+                err_msg = f"Generation failed: {e}"
+                yield f"\n[Error: {err_msg}]\n"
+                self._messages.append({
+                    "role": "assistant",
+                    "content": f"[error: {err_msg}]",
+                })
+                return
             _force_tool = False
 
             # ── Collect streamed response ─────────────────────────────────────
@@ -143,48 +262,66 @@ class VibeModel:
             stream_buf = ""
             text_tool_call_started = False
 
-            for chunk in stream:
-                delta = chunk["choices"][0].get("delta", {})
+            try:
+                for chunk in stream:
+                    delta = chunk["choices"][0].get("delta", {})
 
-                # Accumulate text tokens
-                if delta.get("content"):
-                    token = delta["content"]
-                    assistant_text += token
+                    # Accumulate text tokens
+                    if delta.get("content"):
+                        token = delta["content"]
+                        assistant_text += token
 
-                    if not text_tool_call_started:
-                        stream_buf += token
-                        if _TAG in stream_buf:
-                            # Yield everything before the tag, then stop
-                            pre = stream_buf[:stream_buf.find(_TAG)]
-                            if pre:
-                                yield from self._emit_text(pre)
-                            text_tool_call_started = True
-                            stream_buf = ""
-                        elif len(stream_buf) > len(_TAG):
-                            # Safe to yield all but last len(_TAG)-1 chars
-                            safe_len = len(stream_buf) - len(_TAG) + 1
-                            yield from self._emit_text(stream_buf[:safe_len])
-                            stream_buf = stream_buf[safe_len:]
-                    # else: text tool call in progress — accumulate only
+                        if not text_tool_call_started:
+                            stream_buf += token
+                            if _TAG in stream_buf:
+                                # Yield everything before the tag, then stop
+                                pre = stream_buf[:stream_buf.find(_TAG)]
+                                if pre:
+                                    yield from self._emit_text(pre)
+                                text_tool_call_started = True
+                                stream_buf = ""
+                            elif len(stream_buf) > len(_TAG):
+                                # Safe to yield all but last len(_TAG)-1 chars
+                                safe_len = len(stream_buf) - len(_TAG) + 1
+                                yield from self._emit_text(stream_buf[:safe_len])
+                                stream_buf = stream_buf[safe_len:]
+                        # else: text tool call in progress — accumulate only
 
-                # Accumulate structured tool calls (when llama-cpp does parse them)
-                if delta.get("tool_calls"):
-                    for tc in delta["tool_calls"]:
-                        idx = tc.get("index", 0)
-                        if idx not in tool_calls_acc:
-                            tool_calls_acc[idx] = {
-                                "id": tc.get("id", ""),
-                                "type": "function",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        acc = tool_calls_acc[idx]
-                        if tc.get("id"):
-                            acc["id"] = tc["id"]
-                        fn = tc.get("function", {})
-                        if fn.get("name"):
-                            acc["function"]["name"] += fn["name"]
-                        if fn.get("arguments"):
-                            acc["function"]["arguments"] += fn["arguments"]
+                    # Accumulate structured tool calls
+                    if delta.get("tool_calls"):
+                        for tc in delta["tool_calls"]:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {
+                                    "id": tc.get("id", f"tc_{idx}"),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            acc = tool_calls_acc[idx]
+                            if tc.get("id"):
+                                acc["id"] = tc["id"]
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                acc["function"]["name"] += fn["name"]
+                            args_val = fn.get("arguments")
+                            if args_val is not None:
+                                if isinstance(args_val, str):
+                                    acc["function"]["arguments"] += args_val
+                                else:
+                                    # ollama sometimes returns dict instead of string
+                                    acc["function"]["arguments"] = json.dumps(args_val)
+            except KeyboardInterrupt:
+                # Flush what we have and return
+                if stream_buf:
+                    yield from self._emit_text(stream_buf)
+                if assistant_text:
+                    self._messages.append({"role": "assistant", "content": assistant_text})
+                return
+            except Exception as e:
+                yield f"\n[Stream error: {e}]\n"
+                if assistant_text:
+                    self._messages.append({"role": "assistant", "content": assistant_text})
+                return
 
             # Flush any remaining buffered text (no tool_call detected)
             if stream_buf and not text_tool_call_started:
@@ -205,8 +342,6 @@ class VibeModel:
                 # comment, write it automatically (model can't do it via tool call)
                 _saved = _auto_save_code_blocks(_visible)
                 if _saved:
-                    # Build fake tool_calls and results so the model knows
-                    # files were written and can edit them on future turns
                     fake_tool_calls = []
                     tool_results = []
                     from .tools import write_file as _write_file
@@ -273,22 +408,30 @@ class VibeModel:
 
             for tc in tool_calls:
                 name = tc["function"]["name"]
+                raw_args = tc["function"]["arguments"] or "{}"
                 try:
-                    args = json.loads(tc["function"]["arguments"] or "{}")
-                except json.JSONDecodeError:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except (json.JSONDecodeError, TypeError):
                     args = {}
+                    yield f"\n[Warning: malformed tool arguments for {name}, using defaults]\n"
 
                 yield f"\x00TOOL_START\x00{name}\x00{json.dumps(args)}\x00"
 
-                result = execute_tool(name, args)
+                try:
+                    result = execute_tool(name, args)
+                except Exception as e:
+                    result = f"Error executing {name}: {e}"
 
                 yield f"\x00TOOL_END\x00{result}\x00"
 
                 self._messages.append({
                     "role": "tool",
-                    "tool_call_id": tc["id"],
+                    "tool_call_id": tc.get("id", f"tc_{name}"),
                     "content": result,
                 })
+
+            # Prune after tool results to stay within context
+            self._prune_messages()
 
             # Loop: send tool results back to model
 
@@ -321,8 +464,7 @@ class VibeModel:
         return trimmed
 
     def _ollama_stream(self, tool_choice: str = "auto"):
-        # Use non-streaming — ollama's streaming API does not emit tool_calls in
-        # deltas; non-streaming reliably returns them. Fake a stream from the result.
+        """Non-streaming ollama call, faked as a stream of chunks."""
         payload = json.dumps({
             "model": cfg.OLLAMA_MODEL,
             "messages": self._trim_messages_for_ollama(),
@@ -343,11 +485,35 @@ class VibeModel:
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=cfg.OLLAMA_TIMEOUT) as resp:
-            result = json.loads(resp.read())
+
+        # Retry once on transient network errors
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=cfg.OLLAMA_TIMEOUT) as resp:
+                    body = resp.read()
+                break
+            except urllib.error.HTTPError as e:
+                if e.code >= 500 and attempt == 0:
+                    # Server error — trim harder and retry
+                    time.sleep(1)
+                    continue
+                raise RuntimeError(f"Ollama HTTP {e.code}: {e.read().decode()[:200]}")
+            except urllib.error.URLError as e:
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                raise RuntimeError(f"Ollama connection failed: {e.reason}")
+
+        try:
+            result = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Ollama returned invalid JSON: {e}")
+
+        if "choices" not in result or not result["choices"]:
+            raise RuntimeError(f"Ollama returned unexpected response: {json.dumps(result)[:200]}")
 
         choice = result["choices"][0]
-        message = choice["message"]
+        message = choice.get("message", {})
         reasoning = (message.get("reasoning") or "").strip()
         content = (message.get("content") or "").strip()
         tool_calls = message.get("tool_calls") or []
@@ -361,6 +527,8 @@ class VibeModel:
             args = fn.get("arguments", "{}")
             if not isinstance(args, str):
                 fn["arguments"] = json.dumps(args)
+            # Ensure name is present
+            fn.setdefault("name", "unknown")
 
         # Emit reasoning as one think block (if thinking mode on)
         if reasoning and cfg.THINKING:

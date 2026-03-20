@@ -12,7 +12,10 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''main.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''vibe/tools.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''vibe/llm.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''vibe/tools.py''\\).read\\(\\)\\); print\\(''tools OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''vibe/tools.py''\\).read\\(\\)\\); print\\(''tools OK''\\)\")",
+      "Bash(python -c \"from vibe.tools import TOOL_SCHEMAS, execute_tool; print\\(f''{len\\(TOOL_SCHEMAS\\)} tools OK''\\)\")",
+      "Bash(python -c \"from vibe.ui import stream_response, print_welcome; print\\(''ui OK''\\)\")",
+      "Bash(python -c \"from vibe.system import sys_info, kill_process; print\\(''system OK''\\)\")"
     ]
   }
 }

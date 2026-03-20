@@ -48,7 +48,10 @@ def _save_memory(model: VibeModel):
 
     existing = ""
     if mem_path.exists():
-        existing = mem_path.read_text(encoding="utf-8").strip()
+        try:
+            existing = mem_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
 
     summary_prompt = (
         "Summarise this session concisely for future context. "
@@ -58,13 +61,20 @@ def _save_memory(model: VibeModel):
     if existing:
         summary_prompt += f"\nPrevious memory:\n{existing}\n\nMerge with new info."
 
+    # Use tool-free summarization to prevent accidental file modifications
+    print_info("Summarizing session...")
     tokens = []
-    for tok in model.chat(summary_prompt):
-        if tok.startswith("\x00"):
-            continue
-        tokens.append(tok)
+    try:
+        for tok in model.summarize(summary_prompt):
+            tokens.append(tok)
+    except Exception as e:
+        print_error(f"Summarization failed: {e}")
+        return
 
     summary = "".join(tokens).strip()
+    # Strip thinking blocks if present
+    import re
+    summary = re.sub(r"<think>[\s\S]*?</think>", "", summary).strip()
     if summary:
         mem_path.write_text(summary + "\n", encoding="utf-8")
         print_info(f"Session saved to {mem_path}")

@@ -1,6 +1,6 @@
 import os
+import shlex
 import subprocess
-import glob as glob_module
 import re
 from pathlib import Path
 
@@ -119,26 +119,21 @@ TOOL_SCHEMAS = [
 # ── Self-protection: prevent vibe from editing its own source ─────────────────
 
 _VIBE_ROOT = Path(__file__).resolve().parent.parent
-_PROTECTED_PATHS = {
-    _VIBE_ROOT / "main.py",
-    _VIBE_ROOT / "vibe",
-    _VIBE_ROOT / "vibe.sh",
-    _VIBE_ROOT / "setup.sh",
-    _VIBE_ROOT / "requirements.txt",
-}
 
 
 def _is_protected(path: str) -> bool:
-    """Return True if path is inside the vibe-code installation."""
+    """Return True if path resolves to inside the vibe-code installation."""
     try:
         resolved = Path(path).expanduser().resolve()
-        # Check exact match or if inside a protected directory
-        for pp in _PROTECTED_PATHS:
-            if resolved == pp or (pp.is_dir() and pp in resolved.parents):
-                return True
-        return False
+        # Check if the resolved path is under _VIBE_ROOT
+        try:
+            resolved.relative_to(_VIBE_ROOT)
+            return True
+        except ValueError:
+            return False
     except Exception:
-        return False
+        # If we can't resolve, err on the side of caution
+        return True
 
 
 _PROTECTED_ERROR = (
@@ -150,6 +145,9 @@ _PROTECTED_ERROR = (
 
 # ── Tool implementations ────────────────────────────────────────────────────────
 
+_MAX_READ_SIZE = 512 * 1024  # 512KB — refuse to read huge binary files
+
+
 def read_file(path: str) -> str:
     p = Path(path).expanduser()
     if not p.exists():
@@ -157,10 +155,15 @@ def read_file(path: str) -> str:
     if not p.is_file():
         return f"Error: not a file: {path}"
     try:
+        size = p.stat().st_size
+        if size > _MAX_READ_SIZE:
+            return f"Error: file too large ({size:,} bytes). Max: {_MAX_READ_SIZE:,} bytes."
         text = p.read_text(encoding="utf-8", errors="replace")
         lines = text.splitlines()
         numbered = "\n".join(f"{i+1:4d}  {line}" for i, line in enumerate(lines))
         return f"<file path={path} lines={len(lines)}>\n{numbered}\n</file>"
+    except UnicodeDecodeError:
+        return f"Error: {path} appears to be a binary file."
     except Exception as e:
         return f"Error reading {path}: {e}"
 
@@ -169,10 +172,11 @@ def write_file(path: str, content: str) -> str:
     if _is_protected(path):
         return _PROTECTED_ERROR
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
     try:
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         lines = content.count("\n") + 1
+        _edit_fail_counts.pop(str(p.resolve()), None)
         _edit_success_counts.pop(str(p.resolve()), None)
         return f"Written {lines} lines to {path}"
     except Exception as e:
@@ -181,24 +185,36 @@ def write_file(path: str, content: str) -> str:
 
 _edit_fail_counts: dict[str, int] = {}
 _edit_success_counts: dict[str, int] = {}
-_EDIT_CHURN_THRESHOLD = 5  # warn after this many successive edits to the same file
+_EDIT_CHURN_THRESHOLD = 5
+_EDIT_FAIL_LIMIT = 3  # after this many fails, refuse edit_file entirely for this file
 
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
     if _is_protected(path):
         return _PROTECTED_ERROR
+    if old_string == new_string:
+        return "Error: old_string and new_string are identical — nothing to change."
     p = Path(path).expanduser()
     if not p.exists():
         return f"Error: file not found: {path}"
     try:
+        key = str(p.resolve())
         original = p.read_text(encoding="utf-8", errors="replace")
+
+        # If this file has already failed too many times, refuse outright
+        if _edit_fail_counts.get(key, 0) >= _EDIT_FAIL_LIMIT:
+            return (
+                f"REFUSED: edit_file has failed {_edit_fail_counts[key]} times on {path}. "
+                f"You MUST use write_file to rewrite the entire file. "
+                f"Do NOT call edit_file on this file again."
+            )
+
         count = original.count(old_string)
         if count == 0:
-            key = str(p.resolve())
             _edit_fail_counts[key] = _edit_fail_counts.get(key, 0) + 1
             fails = _edit_fail_counts[key]
             # Show the full file so the model has everything it needs for write_file
-            preview = original.replace("\t", "→")
+            preview = original
             header = (
                 f"STOP. edit_file has failed {fails} time(s) on {path}. "
                 f"old_string does not exist in the file. "
@@ -207,10 +223,9 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
             )
             return header + preview
         if count > 1:
-            return f"Error: old_string matches {count} times in {path} — make it more specific"
+            return f"Error: old_string matches {count} times in {path} — make it more specific."
         updated = original.replace(old_string, new_string, 1)
         p.write_text(updated, encoding="utf-8")
-        key = str(p.resolve())
         _edit_fail_counts.pop(key, None)
         _edit_success_counts[key] = _edit_success_counts.get(key, 0) + 1
         n = _edit_success_counts[key]
@@ -227,10 +242,11 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 _BASH_MAX_LINES = 100
-_tty_blocked: set[str] = {}  # script paths that have already timed out this session
+_tty_blocked: dict[str, float] = {}  # script path → timestamp when blocked
+_TTY_BLOCK_TIMEOUT = 300  # 5 min — allow retry after this
 
 _TTY_BLOCK_ERROR = (
-    "BLOCKED: This script has already timed out once this session, which means it requires "
+    "BLOCKED: This script timed out recently, which means it requires "
     "an interactive terminal (TTY). Running it again will not work. "
     "Do NOT call bash on this script again. "
     "Tell the user the script is complete and they should run it directly in their terminal."
@@ -239,15 +255,13 @@ _TTY_BLOCK_ERROR = (
 
 def _extract_script_path(command: str) -> str | None:
     """Return the script path if the command is executing a shell script file."""
-    import re
-    # Match: ./foo.sh, bash foo.sh, sh ./foo.sh, python foo.py, etc.
     m = re.search(r'(?:^|(?:bash|sh|python3?|node|ruby|perl)\s+)(\.?\.?/?\S+\.(?:sh|py|js|rb|pl))', command)
     return m.group(1) if m else None
 
 
 _ECHO_WRITE_RE = re.compile(
     r'(?:echo|printf)\s+.{10,}\s*>{1,2}\s*\S+'   # echo "..." > file
-    r'|cat\s*(?:<<[-\w]*|>)\s*\S'                # cat <<EOF > file  or  cat > file
+    r'|cat\s*(?:<<[-\w]*|>)\s*\S'                 # cat <<EOF > file  or  cat > file
     , re.DOTALL
 )
 
@@ -258,26 +272,57 @@ _ECHO_WRITE_ERROR = (
 )
 
 
-_BASH_MODIFY_RE = re.compile(
-    r'(?:sed\s+-i|mv\s|cp\s|rm\s|chmod\s|chown\s|truncate\s|>\s*)'
-)
-
-
 def _bash_targets_protected(command: str) -> bool:
-    """Check if a bash command tries to modify vibe's own files."""
-    if not _BASH_MODIFY_RE.search(command):
+    """Check if a bash command tries to modify vibe's own files using resolved paths."""
+    # Quick check: does the command contain any modifying operations?
+    modify_keywords = ('sed -i', 'mv ', 'cp ', 'rm ', 'chmod ', 'chown ',
+                       'truncate ', '> ', '>> ')
+    if not any(kw in command for kw in modify_keywords):
         return False
-    vibe_root = str(_VIBE_ROOT)
-    # Check for references to vibe source paths in the command
-    protected_names = ["main.py", "vibe/", "vibe.sh", "setup.sh", "requirements.txt"]
-    for name in protected_names:
-        full = os.path.join(vibe_root, name)
-        if full in command or (vibe_root in command and name in command):
-            return True
+    # Resolve any paths mentioned in the command and check against vibe root
+    vibe_root_str = str(_VIBE_ROOT)
+    # Check for direct references to vibe's directory
+    if vibe_root_str in command:
+        return True
+    # Check for relative paths that could resolve to vibe files
+    # Extract potential file paths from the command
+    tokens = command.split()
+    for token in tokens:
+        token = token.strip("'\"")
+        if not token or token.startswith('-'):
+            continue
+        try:
+            resolved = str(Path(token).expanduser().resolve())
+            if resolved.startswith(vibe_root_str + "/") or resolved == vibe_root_str:
+                return True
+        except Exception:
+            continue
     return False
 
 
+# Dangerous commands that should never be run
+_DANGEROUS_RE = re.compile(
+    r'rm\s+(-rf?|--recursive)\s+[/~]'     # rm -rf / or ~
+    r'|:\(\)\s*\{\s*:\|:\s*&\s*\}\s*;'     # fork bomb
+    r'|mkfs\.'                               # format filesystem
+    r'|dd\s+.*of=/dev/'                      # dd to device
+    r'|>\s*/dev/sd'                           # write to raw device
+    , re.DOTALL
+)
+
+_DANGEROUS_ERROR = (
+    "BLOCKED: This command could cause serious system damage. "
+    "Refusing to execute."
+)
+
+
 def bash(command: str, timeout: int = 30) -> str:
+    if not command or not command.strip():
+        return "Error: empty command."
+
+    if _DANGEROUS_RE.search(command):
+        return _DANGEROUS_ERROR
+
     if _ECHO_WRITE_RE.search(command):
         return _ECHO_WRITE_ERROR
 
@@ -286,7 +331,15 @@ def bash(command: str, timeout: int = 30) -> str:
 
     script = _extract_script_path(command)
     if script and script in _tty_blocked:
-        return _TTY_BLOCK_ERROR
+        import time
+        # Allow retry after timeout period
+        if time.monotonic() - _tty_blocked[script] < _TTY_BLOCK_TIMEOUT:
+            return _TTY_BLOCK_ERROR
+        else:
+            del _tty_blocked[script]
+
+    # Cap timeout to prevent indefinite hangs
+    timeout = min(max(timeout, 5), 120)
 
     try:
         result = subprocess.run(
@@ -300,6 +353,9 @@ def bash(command: str, timeout: int = 30) -> str:
         if result.stdout:
             output += result.stdout
         if result.stderr:
+            # Separate stderr visually so the model can tell them apart
+            if output and result.stderr.strip():
+                output += "\n[stderr]\n"
             output += result.stderr
         if result.returncode != 0:
             output += f"\n[exit code {result.returncode}]"
@@ -308,12 +364,14 @@ def bash(command: str, timeout: int = 30) -> str:
         # Truncate to avoid bloating the context with noisy output
         lines = output.splitlines()
         if len(lines) > _BASH_MAX_LINES:
-            half = _BASH_MAX_LINES // 2
+            # Keep more tail than head — errors are usually at the end
+            head = _BASH_MAX_LINES // 3
+            tail = _BASH_MAX_LINES - head
             omitted = len(lines) - _BASH_MAX_LINES
             output = (
-                "\n".join(lines[:half])
+                "\n".join(lines[:head])
                 + f"\n\n... ({omitted} lines omitted) ...\n\n"
-                + "\n".join(lines[-half:])
+                + "\n".join(lines[-tail:])
             )
 
         # Detect common no-TTY failures for interactive programs
@@ -321,6 +379,9 @@ def bash(command: str, timeout: int = 30) -> str:
             "cbreak() returned ERR", "nocbreak() returned ERR",
             "setupterm: could not find terminal", "not a terminal",
         )):
+            if script:
+                import time
+                _tty_blocked[script] = time.monotonic()
             return (
                 "Error: this program requires an interactive terminal (TTY) and cannot be "
                 "run through the bash tool. Write the code and instruct the user to run it "
@@ -330,12 +391,13 @@ def bash(command: str, timeout: int = 30) -> str:
         return output
     except subprocess.TimeoutExpired:
         if script:
-            _tty_blocked.add(script)
+            import time
+            _tty_blocked[script] = time.monotonic()
         return (
             f"Error: command timed out after {timeout}s. "
             "This means the program requires an interactive terminal (TTY) — "
             "it is waiting for input or running an event/game loop that never exits. "
-            "This script is now BLOCKED from running via bash for the rest of this session. "
+            "This script is now BLOCKED from running via bash for this session. "
             "Do NOT retry. Do NOT modify the script to add timeouts. "
             "Tell the user the script is ready and they should run it directly in their terminal."
         )
@@ -343,15 +405,26 @@ def bash(command: str, timeout: int = 30) -> str:
         return f"Error: {e}"
 
 
+_GLOB_MAX = 200
+
+
 def glob(pattern: str, path: str | None = None) -> str:
     root = Path(path).expanduser() if path else Path.cwd()
+    if not root.is_dir():
+        return f"Error: not a directory: {path}"
     try:
         matches = sorted(root.glob(pattern))
         if not matches:
             return "No files matched."
-        return "\n".join(str(m.relative_to(root)) for m in matches[:200])
+        lines = [str(m.relative_to(root)) for m in matches[:_GLOB_MAX]]
+        if len(matches) > _GLOB_MAX:
+            lines.append(f"... (+{len(matches) - _GLOB_MAX} more files, narrow your pattern)")
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+_GREP_MAX = 500
 
 
 def grep(pattern: str, path: str | None = None, file_glob: str | None = None) -> str:
@@ -362,39 +435,52 @@ def grep(pattern: str, path: str | None = None, file_glob: str | None = None) ->
         return f"Invalid regex: {e}"
 
     results = []
+    skipped = 0
     file_iter = root.rglob(file_glob) if file_glob else root.rglob("*")
 
     for fp in file_iter:
         if not fp.is_file():
             continue
         try:
-            for i, line in enumerate(fp.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            text = fp.read_text(encoding="utf-8", errors="replace")
+            for i, line in enumerate(text.splitlines(), 1):
                 if compiled.search(line):
                     rel = fp.relative_to(root)
                     results.append(f"{rel}:{i}: {line.rstrip()}")
-        except Exception:
+        except (PermissionError, OSError):
+            skipped += 1
             continue
-        if len(results) >= 500:
-            results.append("... (truncated at 500 results)")
+        if len(results) >= _GREP_MAX:
+            results.append(f"... (truncated at {_GREP_MAX} results)")
             break
 
-    return "\n".join(results) if results else "No matches found."
+    out = "\n".join(results) if results else "No matches found."
+    if skipped:
+        out += f"\n[{skipped} file(s) skipped due to read errors]"
+    return out
 
 
 def list_dir(path: str | None = None) -> str:
     p = Path(path).expanduser() if path else Path.cwd()
     if not p.exists():
         return f"Error: path not found: {path}"
+    if not p.is_dir():
+        return f"Error: not a directory: {path}"
     try:
         entries = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name))
         lines = []
         for e in entries:
-            if e.is_dir():
-                lines.append(f"  {e.name}/")
-            else:
-                size = e.stat().st_size
-                lines.append(f"  {e.name}  ({size:,} bytes)")
+            try:
+                if e.is_dir():
+                    lines.append(f"  {e.name}/")
+                else:
+                    size = e.stat().st_size
+                    lines.append(f"  {e.name}  ({size:,} bytes)")
+            except OSError:
+                lines.append(f"  {e.name}  [unreadable]")
         return "\n".join(lines) or "(empty directory)"
+    except PermissionError:
+        return f"Error: permission denied: {path}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -415,8 +501,10 @@ TOOL_MAP = {
 def execute_tool(name: str, args: dict) -> str:
     fn = TOOL_MAP.get(name)
     if fn is None:
-        return f"Error: unknown tool '{name}'"
+        return f"Error: unknown tool '{name}'. Available: {', '.join(TOOL_MAP)}"
     try:
         return fn(args)
     except TypeError as e:
-        return f"Error: bad arguments for {name}: {e}"
+        return f"Error: bad arguments for {name}: {e}. Expected: {list(args.keys()) if args else 'none'}"
+    except Exception as e:
+        return f"Error executing {name}: {e}"

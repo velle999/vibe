@@ -163,9 +163,11 @@ def stream_response(token_iter) -> str:
     full_text = ""
     current_tool_name = ""
     pending = ""
-    t_start = time.monotonic()
+    session_start = time.monotonic()  # tracks total wall time
+    t_start = time.monotonic()        # tracks per-segment timing
     think_elapsed: float | None = None
     first_token = True
+    tool_count = 0
 
     console.print()  # blank line before response
 
@@ -197,6 +199,7 @@ def stream_response(token_iter) -> str:
                         args = {}
                     print_tool_call(name, args)
                     current_tool_name = name
+                    tool_count += 1
                     continue
 
                 # ── Tool signal: TOOL_END ─────────────────────────────────────
@@ -211,6 +214,17 @@ def stream_response(token_iter) -> str:
                     first_token = True
                     t_start = time.monotonic()
                     status.start()
+                    continue
+
+                # ── Error/warning from llm.py ────────────────────────────────
+                if token.startswith("\n[") and (
+                    "Error:" in token or "Warning:" in token or "max tool" in token
+                ):
+                    if pending:
+                        console.print(pending, end="", markup=False, highlight=False)
+                        full_text += pending
+                        pending = ""
+                    console.print(f"[yellow]{token.strip()}[/]")
                     continue
 
                 # ── Regular text token ────────────────────────────────────────
@@ -229,9 +243,14 @@ def stream_response(token_iter) -> str:
         console.print(pending, end="", markup=False, highlight=False)
 
     console.print()
-    if think_elapsed is not None:
-        total = time.monotonic() - t_start + think_elapsed
-        console.print(f"[dim]⏱ thought for {think_elapsed:.1f}s · total {total:.1f}s[/]")
+    total = time.monotonic() - session_start
+    parts = []
+    if think_elapsed is not None and think_elapsed > 0.5:
+        parts.append(f"thought {think_elapsed:.1f}s")
+    if tool_count:
+        parts.append(f"{tool_count} tool call{'s' if tool_count != 1 else ''}")
+    parts.append(f"total {total:.1f}s")
+    console.print(f"[dim]⏱ {' · '.join(parts)}[/]")
     return full_text
 
 
