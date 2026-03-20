@@ -119,21 +119,33 @@ TOOL_SCHEMAS = [
 # ── Self-protection: prevent vibe from editing its own source ─────────────────
 
 _VIBE_ROOT = Path(__file__).resolve().parent.parent
+_VIBE_SRC = _VIBE_ROOT / "vibe"
+
+# Only protect vibe's own source files, NOT user project files created in the same dir
+_PROTECTED_FILES = {
+    _VIBE_ROOT / "main.py",
+    _VIBE_ROOT / "vibe.sh",
+    _VIBE_ROOT / "setup.sh",
+    _VIBE_ROOT / "requirements.txt",
+    _VIBE_ROOT / "README.md",
+}
 
 
 def _is_protected(path: str) -> bool:
-    """Return True if path resolves to inside the vibe-code installation."""
+    """Return True if path is one of vibe's own source files."""
     try:
         resolved = Path(path).expanduser().resolve()
-        # Check if the resolved path is under _VIBE_ROOT
+        # Exact match on known protected files
+        if resolved in _PROTECTED_FILES:
+            return True
+        # Anything inside the vibe/ package directory
         try:
-            resolved.relative_to(_VIBE_ROOT)
+            resolved.relative_to(_VIBE_SRC)
             return True
         except ValueError:
             return False
     except Exception:
-        # If we can't resolve, err on the side of caution
-        return True
+        return False
 
 
 _PROTECTED_ERROR = (
@@ -168,6 +180,9 @@ def read_file(path: str) -> str:
         return f"Error reading {path}: {e}"
 
 
+_REVIEW_THRESHOLD = 80  # lines — nudge self-review for large files
+
+
 def write_file(path: str, content: str) -> str:
     if _is_protected(path):
         return _PROTECTED_ERROR
@@ -178,7 +193,16 @@ def write_file(path: str, content: str) -> str:
         lines = content.count("\n") + 1
         _edit_fail_counts.pop(str(p.resolve()), None)
         _edit_success_counts.pop(str(p.resolve()), None)
-        return f"Written {lines} lines to {path}"
+        msg = f"Written {lines} lines to {path}"
+        if lines >= _REVIEW_THRESHOLD:
+            msg += (
+                f"\n\nThis is a large file ({lines} lines). "
+                f"You MUST now call read_file on {path} to verify the code is correct "
+                f"and complete. Check for: missing function bodies, placeholder comments, "
+                f"syntax errors, undefined variables, incomplete logic. "
+                f"If anything is wrong, rewrite the entire file with write_file."
+            )
+        return msg
     except Exception as e:
         return f"Error writing {path}: {e}"
 
@@ -273,27 +297,20 @@ _ECHO_WRITE_ERROR = (
 
 
 def _bash_targets_protected(command: str) -> bool:
-    """Check if a bash command tries to modify vibe's own files using resolved paths."""
-    # Quick check: does the command contain any modifying operations?
+    """Check if a bash command tries to modify vibe's own source files."""
     modify_keywords = ('sed -i', 'mv ', 'cp ', 'rm ', 'chmod ', 'chown ',
                        'truncate ', '> ', '>> ')
     if not any(kw in command for kw in modify_keywords):
         return False
-    # Resolve any paths mentioned in the command and check against vibe root
-    vibe_root_str = str(_VIBE_ROOT)
-    # Check for direct references to vibe's directory
-    if vibe_root_str in command:
-        return True
-    # Check for relative paths that could resolve to vibe files
-    # Extract potential file paths from the command
+    # Check if any token in the command resolves to a protected file
     tokens = command.split()
     for token in tokens:
         token = token.strip("'\"")
         if not token or token.startswith('-'):
             continue
         try:
-            resolved = str(Path(token).expanduser().resolve())
-            if resolved.startswith(vibe_root_str + "/") or resolved == vibe_root_str:
+            resolved = Path(token).expanduser().resolve()
+            if _is_protected(str(resolved)):
                 return True
         except Exception:
             continue

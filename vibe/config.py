@@ -28,7 +28,7 @@ TOP_P = 0.95
 TOP_K = 20
 MIN_P = 0.0
 REPEAT_PENALTY = 1.1
-MAX_TOKENS = 8192
+MAX_TOKENS = 16384
 
 # Qwen3 thinking mode: True = show CoT reasoning, False = /no_think
 THINKING = False  # use /think to enable — thinking eats tokens before tool calls

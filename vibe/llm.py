@@ -18,7 +18,7 @@ writing code, debugging, refactoring, explaining code, and running commands.
 You have tools to read/write/edit files, run shell commands, search code, and list directories. \
 Use them freely and proactively.
 
-Guidelines:
+## Core rules
 - Always read a file before editing it.
 - Use write_file or edit_file to create/modify files — NEVER use bash echo/cat to write file content.
 - Prefer edit_file over write_file for targeted changes. If edit_file returns "old_string not found", STOP and use write_file to rewrite the whole file — never retry edit_file with the same or similar string.
@@ -27,13 +27,29 @@ Guidelines:
 - NEVER narrate what you are about to do before doing it. Do not say "I'll write the file now" or "Let me create..." — just call the tool immediately. Text before the first tool call is wasted tokens.
 - If a task requires writing code, call write_file first. Explain afterward if needed.
 - If write_file tool call is not available or not working, output the file content as a fenced code block with a filename comment on the first line: ```python\n# file: name.py\n<code>\n``` — the system will save it automatically.
+
+## Complex tasks (games, full apps, multi-file projects)
+When asked to create something complex (a game, a full application, etc.):
+1. Write the COMPLETE file in ONE write_file call. Do not write a skeleton and then edit it — write the full working code from the start.
+2. After writing, ALWAYS read_file to verify the output is correct and complete.
+3. If anything is wrong or incomplete, use write_file to rewrite the ENTIRE file with fixes — do not try to patch with edit_file.
+4. Write WORKING code — every function must have a real implementation, not placeholders or stubs.
+5. For games: include all game logic (collision detection, scoring, input handling, rendering). A game must be playable, not a skeleton.
+6. Think step by step about what the program needs before writing: data structures, game loop, rendering, input handling, state management.
+7. Do NOT use features you are unsure about. Stick to well-known standard library functions.
+
+## Environment
 - The current working directory is: {cwd}
 - OS: Arch Linux. Package manager is pacman (or yay for AUR). Do NOT use apt/apt-get/brew.
 - Python packages: install with pip inside the active virtualenv, not system pip.
+
+## Bash tool constraints
 - The bash tool runs in a subprocess with NO TTY. Do NOT run interactive or terminal-UI programs (curses, pygame, ncurses, etc.) through bash — they will always fail with errors like "cbreak() returned ERR". Write the code and tell the user to run it themselves.
 - Games, TUIs, and any script with a game_loop/event_loop/main_loop CANNOT be tested via bash. They will always time out. When writing such programs: verify correctness by carefully reading the code, then tell the user to run it. NEVER attempt to run a game or interactive script through bash to "test" it.
 - If bash returns a timeout error: STOP immediately. Do NOT retry, do NOT add timeout mechanisms to the script, do NOT keep editing and re-running. A timeout means the program needs a TTY. Tell the user to run it directly.
 - GUI applications (file managers, text editors, browsers, etc.) CAN be launched through bash — the display environment (DISPLAY/WAYLAND_DISPLAY) is inherited. Launch them detached: `nohup thunar . &>/dev/null &`. Use xdg-open for generic file/URL opening. To open a file manager: try thunar, nautilus, dolphin, nemo, or pcmanfm in that order.
+
+## Memory
 - Project memory is stored in .vibe/memory.md — read it at the start of a session if it exists, \
 and update it with important decisions, file layouts, and current status so future sessions \
 don't need to rediscover everything.
@@ -345,6 +361,7 @@ class VibeModel:
                     fake_tool_calls = []
                     tool_results = []
                     from .tools import write_file as _write_file
+                    _needs_review = False
                     for i, (path, content) in enumerate(_saved):
                         tc_id = f"auto_{i}"
                         fake_tool_calls.append({
@@ -363,6 +380,8 @@ class VibeModel:
                             "tool_call_id": tc_id,
                             "content": actual,
                         })
+                        if content.count("\n") >= 80:
+                            _needs_review = True
                     # Assistant message (with tool_calls) FIRST, then tool results
                     self._messages.append({
                         "role": "assistant",
@@ -370,6 +389,10 @@ class VibeModel:
                         "tool_calls": fake_tool_calls,
                     })
                     self._messages.extend(tool_results)
+                    if _needs_review:
+                        # Continue the loop — the write_file result includes
+                        # a review nudge, so the model will read and verify
+                        continue
                     return
 
                 _is_stall = (
