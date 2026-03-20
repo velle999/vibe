@@ -224,10 +224,15 @@ class VibeModel:
                     self._reset_system()
                     self._messages.append({
                         "role": "user",
-                        "content": f"/no_think {_original_user_text}. Use write_file immediately. Output only the tool call, no reasoning.",
+                        "content": (
+                            f"/no_think {_original_user_text}.\n\n"
+                            "Output the complete file using a fenced code block with a filename comment:\n"
+                            "```python\n# file: name.py\n<full code here>\n```\n"
+                            "No explanation. Just the code block."
+                        ),
                     })
                     self._think_filter = _ThinkFilter()
-                    _force_tool = True
+                    _force_tool = False
                     continue
 
                 self._messages.append({
@@ -281,12 +286,23 @@ class VibeModel:
             stream=True,
         )
 
+    def _trim_messages_for_ollama(self) -> list[dict]:
+        """Return messages with oversized assistant content truncated to avoid HTTP 500."""
+        MAX_MSG_CHARS = 8000
+        trimmed = []
+        for msg in self._messages:
+            content = msg.get("content") or ""
+            if msg.get("role") == "assistant" and len(content) > MAX_MSG_CHARS:
+                msg = {**msg, "content": content[:MAX_MSG_CHARS] + "\n...[truncated]"}
+            trimmed.append(msg)
+        return trimmed
+
     def _ollama_stream(self, tool_choice: str = "auto"):
         # Use non-streaming — ollama's streaming API does not emit tool_calls in
         # deltas; non-streaming reliably returns them. Fake a stream from the result.
         payload = json.dumps({
             "model": cfg.OLLAMA_MODEL,
-            "messages": self._messages,
+            "messages": self._trim_messages_for_ollama(),
             "tools": TOOL_SCHEMAS,
             "tool_choice": tool_choice,
             "stream": False,
@@ -354,40 +370,38 @@ _STALL_RE = re.compile(
 )
 
 
-_CODE_BLOCK_RE = re.compile(
-    r"```(?:\w+)?\s*\n"          # opening fence
-    r"(?:#\s*(?:file|filename|path):\s*(\S+)\n)?"  # optional # file: path.py
-    r"([\s\S]+?)"                # code content
-    r"```",                      # closing fence
-    re.MULTILINE
+_CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\s*\n([\s\S]+?)```", re.MULTILINE)
+_FILE_COMMENT_RE = re.compile(r'^#\s*(?:file|filename|path):\s*(\S+)', re.MULTILINE)
+_FILENAME_HINT_RE = re.compile(
+    r'[`*]{1,2}([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h))[`*]{1,2}'
 )
-
-# Fallback: extract filename from context like "**tetris.py**" or "`tetris.py`"
-_FILENAME_HINT_RE = re.compile(r'[`*]{1,2}([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h))[`*]{1,2}')
 
 
 def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
     """
-    Find fenced code blocks in model text output and return (path, content) pairs.
-    Used as fallback when the model can't write_file via tool call.
+    Find fenced code blocks and return (path, content) pairs.
+    Checks: # file: comment anywhere in first 5 lines, then context hints.
     """
     results = []
     for m in _CODE_BLOCK_RE.finditer(text):
-        inline_path = m.group(1)
-        code = m.group(2).strip()
+        code = m.group(1).strip()
         if len(code) < 20:
             continue
-        if inline_path:
-            path = inline_path
+
+        # 1. Look for "# file: name" in the first 5 lines of the code
+        first_lines = "\n".join(code.splitlines()[:5])
+        fc = _FILE_COMMENT_RE.search(first_lines)
+        if fc:
+            path = fc.group(1)
         else:
-            # Look for a filename hint near this block
-            block_start = m.start()
-            context = text[max(0, block_start - 200):block_start]
-            hint = _FILENAME_HINT_RE.search(context)
+            # 2. Look for filename hint in surrounding text (before or after block)
+            before = text[max(0, m.start() - 300):m.start()]
+            after = text[m.end():m.end() + 300]
+            hint = _FILENAME_HINT_RE.search(before) or _FILENAME_HINT_RE.search(after)
             if hint:
                 path = hint.group(1)
             else:
-                continue  # no filename found — skip
+                continue  # no filename found
         results.append((path, code))
     return results
 
