@@ -246,6 +246,7 @@ class VibeModel:
 
         _autopush_remaining = 2  # max automatic nudges per user turn
         _force_tool = False      # force tool_choice="required" on next call
+        _no_tools = False        # disable tools entirely (for code-block retries)
         _original_user_text = user_text  # saved for clean retry
         _loop_count = 0
 
@@ -257,7 +258,10 @@ class VibeModel:
 
             # ── Call the model ────────────────────────────────────────────────
             try:
-                stream = self._stream_completion(force_tool=_force_tool)
+                stream = self._stream_completion(
+                    force_tool=_force_tool,
+                    no_tools=_no_tools,
+                )
             except Exception as e:
                 err_msg = f"Generation failed: {e}"
                 yield f"\n[Error: {err_msg}]\n"
@@ -267,6 +271,7 @@ class VibeModel:
                 })
                 return
             _force_tool = False
+            _no_tools = False
 
             # ── Collect streamed response ─────────────────────────────────────
             assistant_text = ""
@@ -416,13 +421,16 @@ class VibeModel:
                         "role": "user",
                         "content": (
                             f"/no_think {_original_user_text}\n\n"
-                            "Call the write_file tool NOW with the complete code. "
-                            "Do NOT output any text before the tool call. "
-                            "Do NOT explain. Just call write_file immediately."
+                            "Output the COMPLETE code in a fenced code block. "
+                            "Put a filename comment on the first line of the code:\n"
+                            "```python\n# file: program.py\n"
+                            "# full working code here\n```\n"
+                            "NO explanation. NO narration. ONLY the code block."
                         ),
                     })
                     self._think_filter = _ThinkFilter()
-                    _force_tool = True  # force tool_choice="required"
+                    _force_tool = False
+                    _no_tools = True  # disable tools for retry
                     continue
 
                 self._messages.append({
@@ -467,14 +475,15 @@ class VibeModel:
 
             # Loop: send tool results back to model
 
-    def _stream_completion(self, force_tool: bool = False):
+    def _stream_completion(self, force_tool: bool = False, no_tools: bool = False):
         tool_choice = "required" if force_tool else "auto"
         if cfg.BACKEND == "ollama":
-            return self._ollama_stream(tool_choice=tool_choice)
-        return self._llm.create_chat_completion(
+            return self._ollama_stream(
+                tool_choice=tool_choice,
+                no_tools=no_tools,
+            )
+        kwargs = dict(
             messages=self._messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice=tool_choice,
             temperature=cfg.TEMPERATURE,
             top_p=cfg.TOP_P,
             top_k=cfg.TOP_K,
@@ -483,6 +492,10 @@ class VibeModel:
             max_tokens=cfg.MAX_TOKENS,
             stream=True,
         )
+        if not no_tools:
+            kwargs["tools"] = TOOL_SCHEMAS
+            kwargs["tool_choice"] = tool_choice
+        return self._llm.create_chat_completion(**kwargs)
 
     def _trim_messages_for_ollama(self) -> list[dict]:
         """Return messages with oversized assistant content truncated to avoid HTTP 500."""
@@ -495,13 +508,11 @@ class VibeModel:
             trimmed.append(msg)
         return trimmed
 
-    def _ollama_stream(self, tool_choice: str = "auto"):
+    def _ollama_stream(self, tool_choice: str = "auto", no_tools: bool = False):
         """Non-streaming ollama call, faked as a stream of chunks."""
-        payload = json.dumps({
+        body: dict = {
             "model": cfg.OLLAMA_MODEL,
             "messages": self._trim_messages_for_ollama(),
-            "tools": TOOL_SCHEMAS,
-            "tool_choice": tool_choice,
             "stream": False,
             "options": {
                 "temperature": cfg.TEMPERATURE,
@@ -511,7 +522,11 @@ class VibeModel:
                 "num_predict": cfg.MAX_TOKENS,
                 "num_ctx": cfg.OLLAMA_CTX,
             },
-        }).encode()
+        }
+        if not no_tools:
+            body["tools"] = TOOL_SCHEMAS
+            body["tool_choice"] = tool_choice
+        payload = json.dumps(body).encode()
         req = urllib.request.Request(
             f"{cfg.OLLAMA_HOST}/v1/chat/completions",
             data=payload,
