@@ -27,13 +27,13 @@ Supports two backends: **ollama** (recommended, easy model management) and **lla
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3.5:9b
+ollama pull qwen3:14b
 ```
 
 Set in `vibe/config.py`:
 ```python
 BACKEND = "ollama"
-OLLAMA_MODEL = "qwen3.5:9b"
+OLLAMA_MODEL = "qwen3:14b"
 ```
 
 Then launch:
@@ -110,6 +110,7 @@ MODEL_PATH = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
 
 | Command                    | Description                              |
 |----------------------------|------------------------------------------|
+| `/offload <n>`             | GPU layers (-1=all, 0=CPU only, N=partial) |
 | `/set temp <0.0-2.0>`      | Generation temperature                   |
 | `/set tokens <n>`          | Max output tokens                        |
 | `/set top_p <0.0-1.0>`     | Nucleus sampling probability             |
@@ -126,17 +127,18 @@ BACKEND      = "ollama"      # "ollama" or "llama_cpp"
 
 # Ollama
 OLLAMA_HOST  = "http://localhost:11434"
-OLLAMA_MODEL = "qwen3.5:9b"
+OLLAMA_MODEL = "qwen3:14b"
+OLLAMA_NUM_GPU = -1          # GPU layers (-1 = all, 0 = CPU only)
 
 # llama-cpp
 MODEL_PATH   = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
 N_CTX        = 32768         # context window (tokens)
-N_GPU_LAYERS = -1            # GPU layers (-1 = all)
+N_GPU_LAYERS = -1            # GPU layers (-1 = all, 0 = CPU only)
 
 # Generation (both backends)
 TEMPERATURE  = 0.6
-MAX_TOKENS   = 8192
-THINKING     = True          # chain-of-thought on by default
+MAX_TOKENS   = 16384
+THINKING     = False         # /think to enable
 ```
 
 ## Project Structure
