@@ -26,37 +26,43 @@ Supports two backends: **ollama** (recommended, easy model management) and **lla
 ### Ollama (recommended)
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:14b
-```
-
-Set in `vibe/config.py`:
-```python
-BACKEND = "ollama"
-OLLAMA_MODEL = "qwen3:14b"
-```
-
-Then launch:
-```bash
+./setup.sh            # installs ollama, pulls qwen3:14b, creates venv
 ./vibe.sh
+```
+
+Other models you can pull:
+```bash
+ollama pull qwen3.5:9b         # smaller, faster
+ollama pull qwen3:30b-a3b      # larger MoE, needs /offload for <16GB VRAM
+ollama pull qwen2.5-coder:14b  # code-specialized
+```
+
+Switch models in `vibe/config.py`:
+```python
+OLLAMA_MODEL = "qwen3:14b"     # change to any pulled model
 ```
 
 ### llama-cpp (direct GGUF)
 
 ```bash
-bash setup.sh
+./setup.sh llama_cpp  # installs CUDA, builds llama-cpp-python, downloads GGUF
+./vibe.sh
 ```
-
-This will:
-1. Create a virtualenv at `.venv/`
-2. Install CUDA toolkit if missing
-3. Build `llama-cpp-python` with CUDA support
-4. Download `Qwen3-8B-Q8_0.gguf` (~8.5GB) into `models/`
 
 Set in `vibe/config.py`:
 ```python
 BACKEND = "llama_cpp"
 MODEL_PATH = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
+```
+
+### GPU offload
+
+If a model doesn't fit entirely in VRAM, use `/offload` at runtime to split layers between GPU and CPU/RAM:
+
+```
+/offload 35    # 35 layers on GPU, rest on CPU/RAM
+/offload 0     # CPU only (no VRAM used)
+/offload -1    # all layers on GPU (default)
 ```
 
 ## Usage
