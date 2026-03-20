@@ -116,6 +116,38 @@ TOOL_SCHEMAS = [
 ]
 
 
+# ── Self-protection: prevent vibe from editing its own source ─────────────────
+
+_VIBE_ROOT = Path(__file__).resolve().parent.parent
+_PROTECTED_PATHS = {
+    _VIBE_ROOT / "main.py",
+    _VIBE_ROOT / "vibe",
+    _VIBE_ROOT / "vibe.sh",
+    _VIBE_ROOT / "setup.sh",
+    _VIBE_ROOT / "requirements.txt",
+}
+
+
+def _is_protected(path: str) -> bool:
+    """Return True if path is inside the vibe-code installation."""
+    try:
+        resolved = Path(path).expanduser().resolve()
+        # Check exact match or if inside a protected directory
+        for pp in _PROTECTED_PATHS:
+            if resolved == pp or (pp.is_dir() and pp in resolved.parents):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+_PROTECTED_ERROR = (
+    "BLOCKED: This file is part of Vibe Code itself. "
+    "You must NOT modify your own source code. "
+    "Operate only on the user's project files."
+)
+
+
 # ── Tool implementations ────────────────────────────────────────────────────────
 
 def read_file(path: str) -> str:
@@ -134,6 +166,8 @@ def read_file(path: str) -> str:
 
 
 def write_file(path: str, content: str) -> str:
+    if _is_protected(path):
+        return _PROTECTED_ERROR
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -151,6 +185,8 @@ _EDIT_CHURN_THRESHOLD = 5  # warn after this many successive edits to the same f
 
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
+    if _is_protected(path):
+        return _PROTECTED_ERROR
     p = Path(path).expanduser()
     if not p.exists():
         return f"Error: file not found: {path}"
@@ -222,9 +258,31 @@ _ECHO_WRITE_ERROR = (
 )
 
 
+_BASH_MODIFY_RE = re.compile(
+    r'(?:sed\s+-i|mv\s|cp\s|rm\s|chmod\s|chown\s|truncate\s|>\s*)'
+)
+
+
+def _bash_targets_protected(command: str) -> bool:
+    """Check if a bash command tries to modify vibe's own files."""
+    if not _BASH_MODIFY_RE.search(command):
+        return False
+    vibe_root = str(_VIBE_ROOT)
+    # Check for references to vibe source paths in the command
+    protected_names = ["main.py", "vibe/", "vibe.sh", "setup.sh", "requirements.txt"]
+    for name in protected_names:
+        full = os.path.join(vibe_root, name)
+        if full in command or (vibe_root in command and name in command):
+            return True
+    return False
+
+
 def bash(command: str, timeout: int = 30) -> str:
     if _ECHO_WRITE_RE.search(command):
         return _ECHO_WRITE_ERROR
+
+    if _bash_targets_protected(command):
+        return _PROTECTED_ERROR
 
     script = _extract_script_path(command)
     if script and script in _tty_blocked:

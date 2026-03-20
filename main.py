@@ -1,237 +1,244 @@
-#!/usr/bin/env python3
-"""Vibe Code — local AI coding assistant powered by llama.cpp + CUDA."""
+"""
+Vibe Code — local AI coding assistant
+REPL entry point with slash commands
+"""
 
 import os
 import sys
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+from rich import box
+
+import vibe.config as cfg
+from vibe.llm import VibeModel
+from vibe.ui import (
+    get_input,
+    print_welcome,
+    print_help,
+    stream_response,
+    print_error,
+    print_info,
+    console,
+)
+from vibe.system import (
+    sys_info,
+    gpu_info,
+    net_info,
+    ps_list,
+    kill_process,
+    service_control,
+    services_list,
+    open_file_manager,
+)
+
+
+def _model_label() -> str:
+    if cfg.BACKEND == "ollama":
+        return f"ollama · {cfg.OLLAMA_MODEL}"
+    return f"llama-cpp · {cfg.MODEL_PATH.name}"
+
+
+def _save_memory(model: VibeModel):
+    """Ask the model to summarise the session into .vibe/memory.md."""
+    vibe_dir = Path.cwd() / ".vibe"
+    vibe_dir.mkdir(exist_ok=True)
+    mem_path = vibe_dir / "memory.md"
+
+    existing = ""
+    if mem_path.exists():
+        existing = mem_path.read_text(encoding="utf-8").strip()
+
+    summary_prompt = (
+        "Summarise this session concisely for future context. "
+        "Include: key decisions, file layout, current status, any bugs/blockers. "
+        "Output ONLY the markdown summary — no preamble, no fences.\n"
+    )
+    if existing:
+        summary_prompt += f"\nPrevious memory:\n{existing}\n\nMerge with new info."
+
+    tokens = []
+    for tok in model.chat(summary_prompt):
+        if tok.startswith("\x00"):
+            continue
+        tokens.append(tok)
+
+    summary = "".join(tokens).strip()
+    if summary:
+        mem_path.write_text(summary + "\n", encoding="utf-8")
+        print_info(f"Session saved to {mem_path}")
+    else:
+        print_error("Empty summary — nothing saved.")
+
+
+def _show_memory():
+    mem_path = Path.cwd() / ".vibe" / "memory.md"
+    if mem_path.exists():
+        content = mem_path.read_text(encoding="utf-8").strip()
+        if content:
+            console.print(Panel(content, title=".vibe/memory.md", border_style="dim", box=box.ROUNDED))
+        else:
+            print_info("Memory file is empty.")
+    else:
+        print_info("No memory file yet. Use /save to create one.")
+
+
+def _show_tokens(model: VibeModel):
+    used = model.token_count()
+    if cfg.BACKEND == "ollama":
+        limit = cfg.OLLAMA_CTX
+    else:
+        limit = cfg.N_CTX
+    pct = min(used / limit, 1.0) if limit else 0
+    bar_len = 30
+    filled = int(bar_len * pct)
+    bar = "█" * filled + "░" * (bar_len - filled)
+    console.print(f"  [bold]Context:[/] [{bar}] {used:,} / {limit:,} tokens ({pct:.0%})")
+    if pct > 0.8:
+        console.print("  [yellow]Warning: context is getting full. Consider /reset or /save then /reset.[/]")
+
+
+def _handle_set(args: str):
+    parts = args.strip().split(None, 1)
+    if len(parts) < 2:
+        print_error("Usage: /set <param> <value>  (temp, tokens, top_p, top_k, repeat_penalty)")
+        return
+    param, val = parts[0].lower(), parts[1]
+    try:
+        if param == "temp":
+            cfg.TEMPERATURE = max(0.0, min(2.0, float(val)))
+            print_info(f"temperature = {cfg.TEMPERATURE}")
+        elif param == "tokens":
+            cfg.MAX_TOKENS = max(1, int(val))
+            print_info(f"max_tokens = {cfg.MAX_TOKENS}")
+        elif param == "top_p":
+            cfg.TOP_P = max(0.0, min(1.0, float(val)))
+            print_info(f"top_p = {cfg.TOP_P}")
+        elif param == "top_k":
+            cfg.TOP_K = max(1, int(val))
+            print_info(f"top_k = {cfg.TOP_K}")
+        elif param == "repeat_penalty":
+            cfg.REPEAT_PENALTY = max(0.0, float(val))
+            print_info(f"repeat_penalty = {cfg.REPEAT_PENALTY}")
+        else:
+            print_error(f"Unknown param '{param}'. Options: temp, tokens, top_p, top_k, repeat_penalty")
+    except ValueError:
+        print_error(f"Invalid value: {val}")
+
 
 def main():
-    # ── Parse args ────────────────────────────────────────────────────────────
-    args = sys.argv[1:]
-    verbose = "--verbose" in args or "-v" in args
-    args = [a for a in args if a not in ("--verbose", "-v")]
+    verbose = "--verbose" in sys.argv
 
-    # Optional: change working directory to a project path
+    # Optional: set working directory from first positional arg
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if args:
         target = Path(args[0]).expanduser().resolve()
         if target.is_dir():
             os.chdir(target)
-            print(f"Working directory: {target}")
         else:
-            print(f"Warning: {args[0]} is not a directory, using cwd")
+            print_error(f"Not a directory: {target}")
+            sys.exit(1)
 
-    cwd = os.getcwd()
-
-    # ── Load model ────────────────────────────────────────────────────────────
-    from vibe.ui import console, print_welcome, print_help, print_info, print_error, get_input, stream_response
-    import vibe.config as cfg
-
-    print_info(f"Loading model… (this takes ~10s on first run)")
     try:
-        from vibe.llm import VibeModel
         model = VibeModel(verbose=verbose)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, RuntimeError) as e:
         print_error(str(e))
         sys.exit(1)
-    except Exception as e:
-        print_error(f"Failed to load model: {e}")
-        sys.exit(1)
 
-    from vibe.system import (
-        sys_info, gpu_info, net_info,
-        ps_list, kill_process,
-        service_control, services_list,
-        open_file_manager,
-    )
+    print_welcome(_model_label())
 
-    if cfg.BACKEND == "ollama":
-        model_label = f"{cfg.OLLAMA_MODEL} · ollama"
-    else:
-        model_label = f"{cfg.MODEL_PATH.name} · llama-cpp"
-    print_welcome(model_label)
-
-    # ── REPL ──────────────────────────────────────────────────────────────────
     while True:
-        user_input = get_input(cwd)
-
-        if user_input is None:
-            print_info("Bye!")
-            break
-
-        if not user_input:
-            continue
-
-        # Slash commands
-        cmd = user_input.lower().strip()
-        raw = user_input.strip()
-
-        if cmd in ("/exit", "/quit", "exit", "quit"):
-            print_info("Bye!")
-            break
-
-        if cmd == "/help":
-            print_help()
-            continue
-
-        if cmd == "/reset":
-            model.reset()
-            print_info("Conversation reset.")
-            continue
-
-        if cmd == "/think":
-            cfg.THINKING = True
-            print_info("Chain-of-thought enabled.")
-            continue
-
-        if cmd == "/nothink":
-            cfg.THINKING = False
-            print_info("Chain-of-thought disabled.")
-            continue
-
-        if cmd == "/model":
-            if cfg.BACKEND == "ollama":
-                print_info(f"Backend: ollama  Model: {cfg.OLLAMA_MODEL}  Host: {cfg.OLLAMA_HOST}")
-            else:
-                print_info(f"Backend: llama_cpp  Model: {cfg.MODEL_PATH}")
-                print_info(f"Context: {cfg.N_CTX} tokens  GPU layers: {cfg.N_GPU_LAYERS}")
-            continue
-
-        if cmd.startswith("/files"):
-            parts = raw.split(None, 1)
-            path = parts[1] if len(parts) > 1 else cwd
-            print_info(open_file_manager(path))
-            continue
-
-        if cmd == "/sys":
-            print_info(sys_info())
-            continue
-
-        if cmd == "/gpu":
-            print_info(gpu_info())
-            continue
-
-        if cmd == "/net":
-            print_info(net_info())
-            continue
-
-        if cmd.startswith("/ps"):
-            parts = raw.split(None, 1)
-            filter_str = parts[1] if len(parts) > 1 else None
-            print_info(ps_list(filter_str))
-            continue
-
-        if cmd.startswith("/kill "):
-            target = raw.split(None, 1)[1].strip()
-            print_info(kill_process(target))
-            continue
-
-        if cmd.startswith("/service "):
-            parts = raw.split()
-            if len(parts) < 2:
-                print_error("Usage: /service <name> [status|start|stop|restart|reload|enable|disable]")
-            else:
-                name = parts[1]
-                action = parts[2] if len(parts) > 2 else "status"
-                print_info(service_control(name, action))
-            continue
-
-        if cmd.startswith("/services"):
-            parts = raw.split(None, 1)
-            filter_str = parts[1] if len(parts) > 1 else None
-            print_info(services_list(filter_str))
-            continue
-
-        if cmd.startswith("/set "):
-            parts = raw.split()
-            valid_params = {
-                "temp": ("TEMPERATURE", float, 0.0, 2.0),
-                "tokens": ("MAX_TOKENS", int, 64, 32768),
-                "top_p": ("TOP_P", float, 0.0, 1.0),
-                "top_k": ("TOP_K", int, 1, 200),
-                "repeat_penalty": ("REPEAT_PENALTY", float, 1.0, 2.0),
-            }
-            if len(parts) < 3:
-                opts = "  ".join(f"{k}" for k in valid_params)
-                print_error(f"Usage: /set <param> <value>  — params: {opts}")
-            else:
-                param, val_str = parts[1].lower(), parts[2]
-                if param not in valid_params:
-                    opts = ", ".join(valid_params)
-                    print_error(f"Unknown param '{param}'. Valid: {opts}")
-                else:
-                    attr, typ, lo, hi = valid_params[param]
-                    try:
-                        val = typ(val_str)
-                        if not (lo <= val <= hi):
-                            print_error(f"{param} must be between {lo} and {hi}")
-                        else:
-                            setattr(cfg, attr, val)
-                            print_info(f"{param} = {val}")
-                    except ValueError:
-                        print_error(f"Invalid value '{val_str}' for {param} (expected {typ.__name__})")
-            continue
-
-        if cmd == "/tokens":
-            used = model.token_count()
-            pct = used / cfg.N_CTX * 100
-            bar_filled = int(pct / 5)
-            bar = "█" * bar_filled + "░" * (20 - bar_filled)
-            color = "red" if pct > 80 else "yellow" if pct > 60 else "green"
-            print_info(f"[{color}]{bar}[/] {used:,} / {cfg.N_CTX:,} tokens ({pct:.1f}%)")
-            continue
-
-        if cmd == "/memory":
-            mem_path = Path(cwd) / ".vibe" / "memory.md"
-            if mem_path.exists():
-                print_info(mem_path.read_text())
-            else:
-                print_info("No memory file yet. Use /save to create one.")
-            continue
-
-        if cmd == "/save":
-            # Use a fresh model call that won't hit context limits
-            # by trimming history to just the save request
-            save_prompt = (
-                "Summarize this session into .vibe/memory.md — include: what we were building, "
-                "key files and their purpose, decisions made, current status, and any known issues. "
-                "Be concise but complete. Create the .vibe/ directory if needed."
-            )
-            try:
-                token_stream = model.chat(save_prompt)
-                stream_response(token_stream)
-            except Exception as e:
-                # Context may be full — trim to just the save request and retry
-                try:
-                    model.reset()
-                    token_stream = model.chat(save_prompt + " (no prior context available — write a placeholder)")
-                    stream_response(token_stream)
-                except Exception as e2:
-                    print_error(f"Save failed: {e2}")
-            continue
-
-        # Chat
         try:
-            # Warn at 80% context usage
-            used = model.token_count()
-            pct = used / cfg.N_CTX * 100
-            if pct >= 80:
-                print_info(f"[yellow]Context {pct:.0f}% full — consider /save then /reset soon[/]")
-
-            token_stream = model.chat(user_input)
-            stream_response(token_stream)
+            text = get_input(os.getcwd())
         except KeyboardInterrupt:
-            print_info("\nCancelled.")
-        except Exception as e:
-            msg = str(e)
-            if "exceed context window" in msg or "exceed context" in msg.lower():
-                used = model.token_count()
-                print_error(f"Context full ({used:,}/{cfg.N_CTX:,} tokens). Use /reset to start fresh.")
+            console.print("\n[bold red]Interrupted.[/]")
+            break
+
+        if text is None:
+            break
+        if not text:
+            continue
+
+        # ── Slash commands ───────────────────────────────────────────
+        if text.startswith("/"):
+            cmd = text.split()[0].lower()
+            rest = text[len(cmd):].strip()
+
+            if cmd == "/exit":
+                console.print("[dim]Goodbye![/]")
+                break
+            elif cmd == "/help":
+                print_help()
+            elif cmd == "/reset":
+                model.reset()
+                print_info("Conversation cleared.")
+            elif cmd == "/think":
+                cfg.THINKING = True
+                print_info("Thinking mode ON — chain-of-thought enabled.")
+            elif cmd == "/nothink":
+                cfg.THINKING = False
+                print_info("Thinking mode OFF — faster responses.")
+            elif cmd == "/model":
+                console.print(f"  Backend: {cfg.BACKEND}")
+                if cfg.BACKEND == "ollama":
+                    console.print(f"  Model:   {cfg.OLLAMA_MODEL}")
+                    console.print(f"  Host:    {cfg.OLLAMA_HOST}")
+                    console.print(f"  Context: {cfg.OLLAMA_CTX:,}")
+                else:
+                    console.print(f"  Model:   {cfg.MODEL_PATH.name}")
+                    console.print(f"  Context: {cfg.N_CTX:,}")
+                console.print(f"  Temp:    {cfg.TEMPERATURE}")
+                console.print(f"  Tokens:  {cfg.MAX_TOKENS:,}")
+                console.print(f"  Think:   {'on' if cfg.THINKING else 'off'}")
+            elif cmd == "/tokens":
+                _show_tokens(model)
+            elif cmd == "/save":
+                _save_memory(model)
+            elif cmd == "/memory":
+                _show_memory()
+            elif cmd == "/sys":
+                console.print(sys_info())
+            elif cmd == "/gpu":
+                console.print(gpu_info())
+            elif cmd == "/net":
+                console.print(net_info())
+            elif cmd == "/ps":
+                console.print(ps_list(rest or None))
+            elif cmd == "/kill":
+                if not rest:
+                    print_error("Usage: /kill <pid|name>")
+                else:
+                    console.print(kill_process(rest))
+            elif cmd == "/files":
+                console.print(open_file_manager(rest or "."))
+            elif cmd == "/service":
+                parts = rest.split(None, 1)
+                if not parts:
+                    print_error("Usage: /service <name> [action]")
+                else:
+                    name = parts[0]
+                    action = parts[1] if len(parts) > 1 else "status"
+                    console.print(service_control(name, action))
+            elif cmd == "/services":
+                console.print(services_list(rest or None))
+            elif cmd == "/set":
+                _handle_set(rest)
             else:
-                print_error(f"Generation failed: {e}")
-            if verbose:
-                import traceback
-                traceback.print_exc()
+                print_error(f"Unknown command: {cmd}. Type /help for commands.")
+            continue
+
+        # ── Chat ─────────────────────────────────────────────────────
+        response = stream_response(model.chat(text))
+
+        # Context warning
+        used = model.token_count()
+        limit = cfg.OLLAMA_CTX if cfg.BACKEND == "ollama" else cfg.N_CTX
+        if limit and used / limit > 0.85:
+            console.print(
+                f"\n[yellow]⚠ Context {used:,}/{limit:,} ({used/limit:.0%}) — "
+                f"consider /save then /reset[/]"
+            )
 
 
 if __name__ == "__main__":
