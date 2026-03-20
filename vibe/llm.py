@@ -85,8 +85,9 @@ class VibeModel:
             content = memory_path.read_text(encoding="utf-8").strip()
             if content:
                 memory_section = f"\n## Memory from previous sessions\n{content}\n"
+        system_content = SYSTEM_PROMPT.format(cwd=cwd, memory_section=memory_section)
         self._messages = [
-            {"role": "system", "content": SYSTEM_PROMPT.format(cwd=cwd, memory_section=memory_section)}
+            {"role": "system", "content": system_content}
         ]
 
     def reset(self):
@@ -124,6 +125,7 @@ class VibeModel:
 
         _autopush_remaining = 2  # max automatic nudges per user turn
         _force_tool = False      # force tool_choice="required" on next call
+        _original_user_text = user_text  # saved for clean retry
 
         while True:
             # ── Call the model ────────────────────────────────────────────────
@@ -205,17 +207,15 @@ class VibeModel:
                 )
                 if _autopush_remaining > 0 and _is_stall:
                     _autopush_remaining -= 1
-                    if assistant_text.strip():
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": assistant_text,
-                        })
+                    # Hard reset: strip all stall noise, go back to system + one
+                    # direct /no_think request so the model acts without reasoning
+                    self._reset_system()
                     self._messages.append({
                         "role": "user",
-                        "content": "Use write_file to do this now. No text, just the tool call.",
+                        "content": f"/no_think {_original_user_text}. Use write_file immediately. Output only the tool call, no reasoning.",
                     })
                     self._think_filter = _ThinkFilter()
-                    _force_tool = True  # next call must emit a tool call
+                    _force_tool = True
                     continue
 
                 self._messages.append({
@@ -255,7 +255,7 @@ class VibeModel:
     def _stream_completion(self, force_tool: bool = False):
         tool_choice = "required" if force_tool else "auto"
         if cfg.BACKEND == "ollama":
-            return self._ollama_stream(tool_choice=tool_choice)
+            return self._ollama_stream()
         return self._llm.create_chat_completion(
             messages=self._messages,
             tools=TOOL_SCHEMAS,
@@ -270,19 +270,22 @@ class VibeModel:
         )
 
     def _ollama_stream(self, tool_choice: str = "auto"):
-        # Ollama does not emit tool_calls in streaming deltas (they appear only
-        # in non-streaming responses). Use non-streaming and simulate a stream.
+        # Use non-streaming — ollama's streaming API does not emit tool_calls in
+        # deltas; non-streaming reliably returns them. Fake a stream from the result.
         payload = json.dumps({
             "model": cfg.OLLAMA_MODEL,
             "messages": self._messages,
             "tools": TOOL_SCHEMAS,
             "tool_choice": tool_choice,
             "stream": False,
-            "temperature": cfg.TEMPERATURE,
-            "top_p": cfg.TOP_P,
-            "top_k": cfg.TOP_K,
-            "repeat_penalty": cfg.REPEAT_PENALTY,
-            "num_predict": cfg.MAX_TOKENS,
+            "options": {
+                "temperature": cfg.TEMPERATURE,
+                "top_p": cfg.TOP_P,
+                "top_k": cfg.TOP_K,
+                "repeat_penalty": cfg.REPEAT_PENALTY,
+                "num_predict": cfg.MAX_TOKENS,
+                "num_ctx": cfg.OLLAMA_CTX,
+            },
         }).encode()
         req = urllib.request.Request(
             f"{cfg.OLLAMA_HOST}/v1/chat/completions",
@@ -292,24 +295,24 @@ class VibeModel:
         with urllib.request.urlopen(req, timeout=300) as resp:
             result = json.loads(resp.read())
 
-        message = result["choices"][0]["message"]
+        choice = result["choices"][0]
+        message = choice["message"]
         reasoning = (message.get("reasoning") or "").strip()
         content = (message.get("content") or "").strip()
         tool_calls = message.get("tool_calls") or []
 
-        # Yield reasoning wrapped in think tags so the existing filter handles it
-        if reasoning:
-            chunk_text = f"<think>{reasoning}</think>"
-            yield {"choices": [{"delta": {"content": chunk_text}, "finish_reason": None}]}
+        # Emit reasoning as one think block (if thinking mode on)
+        if reasoning and cfg.THINKING:
+            yield {"choices": [{"delta": {"content": f"<think>{reasoning}</think>"}, "finish_reason": None}]}
 
-        # Yield content in small chunks for a streaming feel
+        # Emit content in small chunks for a live feel
         if content:
             for i in range(0, len(content), 20):
                 yield {"choices": [{"delta": {"content": content[i:i+20]}, "finish_reason": None}]}
 
-        # Yield tool calls as a single delta
+        # Emit tool calls
         if tool_calls:
-            yield {"choices": [{"delta": {"content": "", "tool_calls": tool_calls}, "finish_reason": "tool_calls"}]}
+            yield {"choices": [{"delta": {"content": None, "tool_calls": tool_calls}, "finish_reason": "tool_calls"}]}
 
     def _emit_text(self, text: str) -> Iterator[str]:
         """Yield text through the think filter (or raw if thinking is on)."""

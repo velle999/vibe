@@ -10,6 +10,7 @@ MODEL_PATH = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
 # Ollama backend
 OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_MODEL = "qwen3.5:9b"
+OLLAMA_CTX = 16384  # ollama defaults to 2048 — must set explicitly
 
 # Model settings
 N_GPU_LAYERS = -1       # offload all layers to GPU
@@ -29,4 +30,4 @@ REPEAT_PENALTY = 1.1
 MAX_TOKENS = 8192
 
 # Qwen3 thinking mode: True = show CoT reasoning, False = /no_think
-THINKING = True
+THINKING = False  # use /think to enable — thinking eats tokens before tool calls
