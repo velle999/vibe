@@ -409,20 +409,20 @@ class VibeModel:
                 )
                 if _autopush_remaining > 0 and _is_stall:
                     _autopush_remaining -= 1
+                    # Signal to UI that we're retrying
+                    yield "\x00RETRY\x00"
                     self._reset_system()
                     self._messages.append({
                         "role": "user",
                         "content": (
-                            f"/no_think {_original_user_text}.\n\n"
-                            "IMPORTANT: Use the write_file tool to create the file. "
-                            "If you cannot use write_file, output a fenced code block with "
-                            "a filename comment on the FIRST LINE of the code:\n"
-                            "```python\n# file: name.py\n<full code here>\n```\n"
-                            "No explanation. Just the code."
+                            f"/no_think {_original_user_text}\n\n"
+                            "Call the write_file tool NOW with the complete code. "
+                            "Do NOT output any text before the tool call. "
+                            "Do NOT explain. Just call write_file immediately."
                         ),
                     })
                     self._think_filter = _ThinkFilter()
-                    _force_tool = False
+                    _force_tool = True  # force tool_choice="required"
                     continue
 
                 self._messages.append({
@@ -470,7 +470,7 @@ class VibeModel:
     def _stream_completion(self, force_tool: bool = False):
         tool_choice = "required" if force_tool else "auto"
         if cfg.BACKEND == "ollama":
-            return self._ollama_stream()
+            return self._ollama_stream(tool_choice=tool_choice)
         return self._llm.create_chat_completion(
             messages=self._messages,
             tools=TOOL_SCHEMAS,

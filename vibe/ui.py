@@ -181,6 +181,16 @@ def stream_response(token_iter) -> str:
                 # Stop the spinner as soon as content arrives
                 status.stop()
 
+                # ── Retry signal: model stalled, retrying ─────────────────────
+                if token == "\x00RETRY\x00":
+                    if pending:
+                        pending = ""  # discard stalled text
+                    console.print("\n[dim]retrying…[/]")
+                    first_token = True
+                    t_start = time.monotonic()
+                    status.start()
+                    continue
+
                 # ── Tool signal: TOOL_START ───────────────────────────────────
                 if token.startswith("\x00TOOL_START\x00"):
                     if pending:
