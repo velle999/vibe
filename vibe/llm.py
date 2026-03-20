@@ -304,7 +304,7 @@ class VibeModel:
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=cfg.OLLAMA_TIMEOUT) as resp:
             result = json.loads(resp.read())
 
         choice = result["choices"][0]

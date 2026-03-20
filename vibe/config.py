@@ -10,7 +10,8 @@ MODEL_PATH = ROOT_DIR / "models" / "Qwen3-8B-Q8_0.gguf"
 # Ollama backend
 OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_MODEL = "qwen3.5:9b"
-OLLAMA_CTX = 32768  # ollama defaults to 2048 — must set explicitly
+OLLAMA_CTX = 32768   # ollama defaults to 2048 — must set explicitly
+OLLAMA_TIMEOUT = 600  # seconds — large codegen can take a while
 
 # Model settings
 N_GPU_LAYERS = -1       # offload all layers to GPU
