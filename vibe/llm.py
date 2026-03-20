@@ -395,10 +395,17 @@ class VibeModel:
                         continue
                     return
 
+                # Don't stall-detect if there's a substantial code block
+                # (the model wrote code but auto-save couldn't find a filename)
+                _has_code_block = bool(re.search(r"```\w*\s*\n.{100,}?```", _visible, re.DOTALL))
+
                 _is_stall = (
-                    not _visible
-                    or len(_visible) < 30
-                    or _STALL_RE.search(_visible)
+                    not _has_code_block
+                    and (
+                        not _visible
+                        or len(_visible) < 30
+                        or _STALL_RE.search(_visible)
+                    )
                 )
                 if _autopush_remaining > 0 and _is_stall:
                     _autopush_remaining -= 1
@@ -407,9 +414,11 @@ class VibeModel:
                         "role": "user",
                         "content": (
                             f"/no_think {_original_user_text}.\n\n"
-                            "Output the complete file using a fenced code block with a filename comment:\n"
+                            "IMPORTANT: Use the write_file tool to create the file. "
+                            "If you cannot use write_file, output a fenced code block with "
+                            "a filename comment on the FIRST LINE of the code:\n"
                             "```python\n# file: name.py\n<full code here>\n```\n"
-                            "No explanation. Just the code block."
+                            "No explanation. Just the code."
                         ),
                     })
                     self._think_filter = _ThinkFilter()
@@ -594,34 +603,82 @@ _STALL_RE = re.compile(
 )
 
 
-_CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\s*\n([\s\S]+?)```", re.MULTILINE)
+_CODE_BLOCK_RE = re.compile(r"```(\w+)?\s*\n([\s\S]+?)```", re.MULTILINE)
 # Matches: # file: name.py, // file: name.js, -- file: name.sql, /* file: name.c */
 _FILE_COMMENT_RE = re.compile(
     r'^(?:#|//|--|/\*)\s*(?:file|filename|path):\s*(\S+)', re.MULTILINE
 )
+
+_SUPPORTED_EXT = r'(?:py|sh|js|ts|rb|go|rs|c|cpp|h|html|css|json|yaml|yml|toml|lua|java|kt)'
+
 # Matches filenames in backticks/bold: `tetris.py`, *game.sh*
 _FILENAME_HINT_STYLED_RE = re.compile(
-    r'[`*]{1,2}([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h|html|css|json|yaml|yml|toml))[`*]{1,2}'
+    rf'[`*]{{1,2}}([\w./\-]+\.{_SUPPORTED_EXT})[`*]{{1,2}}'
 )
 # Matches bare filenames in surrounding prose: "updated tetris.py:" or "save as game.sh"
 _FILENAME_HINT_BARE_RE = re.compile(
-    r'(?:^|[\s(])([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h|html|css|json|yaml|yml|toml))(?=[:\s),]|$)',
+    rf'(?:^|[\s(])([\w./\-]+\.{_SUPPORTED_EXT})(?=[:\s),]|$)',
     re.MULTILINE,
 )
+
+# Map code-fence language tags to file extensions (for fallback naming)
+_LANG_TO_EXT = {
+    "python": "py", "python3": "py", "py": "py",
+    "bash": "sh", "sh": "sh", "shell": "sh", "zsh": "sh",
+    "javascript": "js", "js": "js", "typescript": "ts", "ts": "ts",
+    "ruby": "rb", "go": "go", "rust": "rs",
+    "c": "c", "cpp": "cpp", "java": "java", "kotlin": "kt",
+    "lua": "lua", "html": "html", "css": "css",
+    "json": "json", "yaml": "yaml", "toml": "toml",
+}
+
+# Shebang to extension
+_SHEBANG_RE = re.compile(r'^#!\s*/(?:usr/(?:local/)?)?bin/(?:env\s+)?(\w+)')
+
+
+def _infer_filename_from_code(code: str, lang_tag: str | None) -> str | None:
+    """
+    Last-resort: infer a reasonable filename from the code fence language
+    tag and/or shebang line.  Returns e.g. 'program.py' or None.
+    """
+    ext = None
+    # 1. Try language tag from the code fence
+    if lang_tag:
+        ext = _LANG_TO_EXT.get(lang_tag.lower())
+    # 2. Try shebang
+    if not ext:
+        first_line = code.split("\n", 1)[0]
+        m = _SHEBANG_RE.match(first_line)
+        if m:
+            interp = m.group(1).lower()
+            # python3 → py, bash → sh, etc.
+            ext = _LANG_TO_EXT.get(interp)
+            if not ext and "python" in interp:
+                ext = "py"
+    if ext:
+        return f"program.{ext}"
+    return None
 
 
 def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
     """
     Find fenced code blocks and return (path, content) pairs.
-    Checks: file-comment in first 5 lines → styled filename hint → bare filename hint.
+    Search order:
+      1. # file: comment in first 5 lines of code
+      2. Filename hint in surrounding text (1500 chars before/after)
+      3. Filename anywhere in the full text
+      4. Infer from language tag / shebang
     """
     results = []
     for m in _CODE_BLOCK_RE.finditer(text):
-        code = m.group(1).strip()
+        lang_tag = m.group(1)  # e.g. "python", "bash", or None
+        code = m.group(2).strip()
         if len(code) < 20:
             continue
 
-        # Strip the file comment from the saved content (it's metadata, not code)
+        path = None
+
+        # 1. Look for "# file: name" in the first 5 lines of the code
         first_lines = "\n".join(code.splitlines()[:5])
         fc = _FILE_COMMENT_RE.search(first_lines)
         if fc:
@@ -634,17 +691,27 @@ def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
                     break
             code = "\n".join(code_lines)
         else:
-            # Look for filename hint in surrounding text (300 chars before/after block)
-            before = text[max(0, m.start() - 300):m.start()]
-            after = text[m.end():m.end() + 300]
-            path = None
+            # 2. Nearby context (1500 chars — enough for long explanations)
+            before = text[max(0, m.start() - 1500):m.start()]
+            after = text[m.end():m.end() + 1500]
             for regex in (_FILENAME_HINT_STYLED_RE, _FILENAME_HINT_BARE_RE):
                 hit = regex.search(before) or regex.search(after)
                 if hit:
                     path = hit.group(1)
                     break
+
+            # 3. Search the ENTIRE text as last resort for styled hints
             if not path:
-                continue
+                hit = _FILENAME_HINT_STYLED_RE.search(text)
+                if hit:
+                    path = hit.group(1)
+
+            # 4. Infer from language tag / shebang
+            if not path:
+                path = _infer_filename_from_code(code, lang_tag)
+
+        if not path:
+            continue
         results.append((path, code))
     return results
 
