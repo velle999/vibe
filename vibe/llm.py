@@ -24,6 +24,7 @@ Guidelines:
 - Be concise — lead with action, not explanation.
 - NEVER narrate what you are about to do before doing it. Do not say "I'll write the file now" or "Let me create..." — just call the tool immediately. Text before the first tool call is wasted tokens.
 - If a task requires writing code, call write_file first. Explain afterward if needed.
+- If write_file tool call is not available or not working, output the file content as a fenced code block with a filename comment on the first line: ```python\n# file: name.py\n<code>\n``` — the system will save it automatically.
 - The current working directory is: {cwd}
 - OS: Arch Linux. Package manager is pacman (or yay for AUR). Do NOT use apt/apt-get/brew.
 - Python packages: install with pip inside the active virtualenv, not system pip.
@@ -196,10 +197,23 @@ class VibeModel:
             if not tool_calls and text_tool_call_started:
                 tool_calls = _parse_text_tool_calls(assistant_text)
 
-            # ── No tool calls → done ──────────────────────────────────────────
+            # ── No tool calls → check for inline code blocks to auto-save ──────
             if not tool_calls:
-                # Check for stall: empty response, think-only, or narration without action
                 _visible = re.sub(r"<think>[\s\S]*?</think>", "", assistant_text).strip()
+
+                # Auto-save: if response contains a fenced code block with a filename
+                # comment, write it automatically (model can't do it via tool call)
+                _saved = _auto_save_code_blocks(_visible)
+                if _saved:
+                    for path, content in _saved:
+                        result = f"Written {content.count(chr(10))+1} lines to {path}"
+                        yield f"\x00TOOL_START\x00write_file\x00{json.dumps({'path': path, 'content': content})}\x00"
+                        from .tools import write_file as _write_file
+                        actual = _write_file(path, content)
+                        yield f"\x00TOOL_END\x00{actual}\x00"
+                    self._messages.append({"role": "assistant", "content": assistant_text})
+                    return
+
                 _is_stall = (
                     not _visible
                     or len(_visible) < 30
@@ -207,8 +221,6 @@ class VibeModel:
                 )
                 if _autopush_remaining > 0 and _is_stall:
                     _autopush_remaining -= 1
-                    # Hard reset: strip all stall noise, go back to system + one
-                    # direct /no_think request so the model acts without reasoning
                     self._reset_system()
                     self._messages.append({
                         "role": "user",
@@ -326,11 +338,58 @@ class VibeModel:
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
-# Detects "I'll write / Let me create / I will implement..." without any tool calls
+# Detects narration or post-hoc description instead of actually calling a tool
 _STALL_RE = re.compile(
-    r"(?i)\b(i'?ll|let me|i will|i(?:'m| am) going to|i can|here(?:'s| is)(?: the| a)?)\b"
+    r"(?i)"
+    r"\b(i'?ll|let me|i will|i(?:'m| am) going to|i can|here(?:'s| is)(?: the| a)?)\b"
     r"[\s\S]{0,120}\b(write|create|build|implement|generate|code|make|develop|add)\b"
+    r"|this implementation\b"
+    r"|\bkey fix(es)?\b"
+    r"|\bto run:\s"
+    r"|\bwant me to add\b"
+    r"|\bfeel free to\b"
+    r"|\blet me know\b"
+    r"|\b###\s+\w"           # markdown heading = describing, not acting
+    r"|endoftext"            # leaked template token = context overflow
 )
+
+
+_CODE_BLOCK_RE = re.compile(
+    r"```(?:\w+)?\s*\n"          # opening fence
+    r"(?:#\s*(?:file|filename|path):\s*(\S+)\n)?"  # optional # file: path.py
+    r"([\s\S]+?)"                # code content
+    r"```",                      # closing fence
+    re.MULTILINE
+)
+
+# Fallback: extract filename from context like "**tetris.py**" or "`tetris.py`"
+_FILENAME_HINT_RE = re.compile(r'[`*]{1,2}([\w./\-]+\.(?:py|sh|js|ts|rb|go|rs|c|cpp|h))[`*]{1,2}')
+
+
+def _auto_save_code_blocks(text: str) -> list[tuple[str, str]]:
+    """
+    Find fenced code blocks in model text output and return (path, content) pairs.
+    Used as fallback when the model can't write_file via tool call.
+    """
+    results = []
+    for m in _CODE_BLOCK_RE.finditer(text):
+        inline_path = m.group(1)
+        code = m.group(2).strip()
+        if len(code) < 20:
+            continue
+        if inline_path:
+            path = inline_path
+        else:
+            # Look for a filename hint near this block
+            block_start = m.start()
+            context = text[max(0, block_start - 200):block_start]
+            hint = _FILENAME_HINT_RE.search(context)
+            if hint:
+                path = hint.group(1)
+            else:
+                continue  # no filename found — skip
+        results.append((path, code))
+    return results
 
 
 def _parse_text_tool_calls(text: str) -> list[dict]:
